@@ -16,19 +16,26 @@ import type {
   UrlContextMetadata,
 } from "./types.js";
 
-export const DEFAULT_SEARCH_MODEL = "gemini-3.7-flash-tiered";
+export const DEFAULT_SEARCH_MODEL = "gemini-3.8-flash-tiered";
 
 export function resolveSearchModel(customModel?: string): string {
   const envModel = process.env.ANTIGRAVITY_SEARCH_MODEL?.trim();
   const raw = customModel?.trim() || envModel || DEFAULT_SEARCH_MODEL;
-  if (raw === "gemini-3.7-flash") return "gemini-3.7-flash-tiered";
+  if (
+    raw === "gemini-3.8-flash" ||
+    raw === "gemini-3.7-flash" ||
+    raw === "gemini-3.7-flash-tiered" ||
+    raw === "gemini-3.7-flash-low"
+  ) {
+    return "gemini-3.8-flash-tiered";
+  }
   return raw;
 }
 
 const SEARCH_MODEL_FALLBACKS = [
-  "gemini-3.7-flash-tiered",
-  "gemini-3.7-flash-low",
-  "gemini-3.6-flash-low",
+  "gemini-3.8-flash-tiered",
+  "gemini-3.8-flash-low",
+  "gemini-3.8-flash-medium",
 ];
 
 interface SearchCandidate {

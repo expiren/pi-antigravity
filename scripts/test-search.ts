@@ -175,10 +175,14 @@ async function testGoogleGroundingDetails() {
 }
 
 async function testSearchModelResolution() {
-  assert(resolveSearchModel() === "gemini-3.7-flash-tiered", "Default search model is gemini-3.7-flash-tiered");
+  assert(resolveSearchModel() === "gemini-3.8-flash-tiered", "Default search model is gemini-3.8-flash-tiered");
   assert(
-    resolveSearchModel("gemini-3.7-flash") === "gemini-3.7-flash-tiered",
-    "Maps gemini-3.7-flash to tiered",
+    resolveSearchModel("gemini-3.8-flash") === "gemini-3.8-flash-tiered",
+    "Maps gemini-3.8-flash to tiered",
+  );
+  assert(
+    resolveSearchModel("gemini-3.7-flash") === "gemini-3.8-flash-tiered",
+    "Maps legacy gemini-3.7-flash to tiered",
   );
   assert(
     resolveSearchModel("custom-model") === "custom-model",
@@ -364,7 +368,7 @@ async function testSearchRidesSharedTransport() {
 
     assert(endpoints.length === 3, `walked all three endpoints, got ${endpoints.length}`);
     assert(result.text === "the whole answer", `no partial text leaked, got: ${result.text}`);
-    assert(result.model === "gemini-3.7-flash-tiered", "keeps the preferred model");
+    assert(result.model === "gemini-3.8-flash-tiered", "keeps the preferred model");
     assert(result.sources.length === 1, "grounding still becomes sources");
     assert(
       !updates.some((text) => text.includes("half an answer the whole answer")),

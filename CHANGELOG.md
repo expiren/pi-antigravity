@@ -4,7 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-02
+## [1.0.1] - 2026-10-13
+
+### Fixed
+
+- **Web Search & URL Context Model:** Upgrade default search model from `gemini-3.7-flash-tiered` to `gemini-3.8-flash-tiered` (with fallbacks to `gemini-3.8-flash-low` and `gemini-3.8-flash-medium`), fixing `429: Resource has been exhausted` errors caused by Google backend deprecation of Gemini 3.7 / 3.6 search endpoints. Legacy references to `gemini-3.7-flash*` are automatically redirected to `gemini-3.8-flash-tiered`.
 
 ### Breaking
 
