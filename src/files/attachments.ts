@@ -291,31 +291,48 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
       typeof message.content === "string"
         ? [{ type: "text" as const, text: message.content }]
         : message.content;
-    let addition: ImageContent | TextContent;
+    let additions: Array<ImageContent | TextContent>;
+    let available = false;
     try {
       const loaded = await reader.load(attachment.absPath);
       // Pi's ImageContent is the existing carrier for arbitrary Gemini inlineData.
-      addition =
+      const payload: ImageContent | TextContent =
         loaded.kind === "inline"
           ? { type: "image", mimeType: loaded.mimeType, data: loaded.data }
           : {
               type: "text",
               text: `[Attached file content: ${JSON.stringify(attachment.displayName)}; reference: ${attachment.id}]\n${loaded.data}\n[End attached file content: ${attachment.id}]`,
             };
+      // UI mount notifications are not model context. Explain the actual payload,
+      // without claiming that backend decoding or interpretation has succeeded.
+      additions = [
+        {
+          type: "text",
+          text: `[File attachment provided: ${JSON.stringify(attachment.displayName)}]\nThe file content is included in this request; answer directly from the attachment.`,
+        },
+        payload,
+      ];
+      available = true;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       warn(ctx, `文件未发送: ${attachment.displayName} — ${reason}`);
-      addition = {
-        type: "text",
-        text: `[File attachment unavailable: ${JSON.stringify(attachment.displayName)}. ${reason}]`,
-      };
+      additions = [
+        {
+          type: "text",
+          text: `[File attachment unavailable: ${JSON.stringify(attachment.displayName)}. ${reason}]`,
+        },
+      ];
     }
-    const same = (b: ImageContent | TextContent) =>
-      addition.type === "image"
-        ? b.type === "image" && b.mimeType === addition.mimeType && b.data === addition.data
-        : b.type === "text" && b.text === addition.text;
-    if (content.some(same)) return;
-    messages[target] = { ...message, content: [...content, addition] };
+    const missing = additions.filter(
+      (addition) =>
+        !content.some((b) =>
+          addition.type === "image"
+            ? b.type === "image" && b.mimeType === addition.mimeType && b.data === addition.data
+            : b.type === "text" && b.text === addition.text,
+        ),
+    );
+    if (!missing.length) return;
+    messages[target] = { ...message, content: [...content, ...missing] };
     if (Buffer.byteLength(JSON.stringify(messages)) > MAX_CONTEXT_BYTES) {
       warn(ctx, "文件未发送：内联后的上下文超过本地 18 MiB 安全预算，请压缩对话或拆分文件。");
       messages[target] = {
@@ -328,10 +345,7 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
           },
         ],
       };
-    } else if (
-      addition.type === "image" ||
-      !addition.text.startsWith("[File attachment unavailable:")
-    ) {
+    } else if (available) {
       lastWarning = undefined;
     }
     return { messages };

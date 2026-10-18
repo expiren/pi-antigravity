@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Attachment context guidance:** Successful `/file` injection now includes the filename and a one-sentence reminder to answer directly from the content already in the request, without restricting tools. Unavailable/over-budget attachments do not receive a success note; guidance also follows compaction restoration.
 - **M4A attachments:** Recognize `.m4a` as `audio/mp4` with MP4-container header validation, rather than treating it as raw AAC. Includes completion and request-serialization coverage.
 
 ## [1.0.1] - 2026-10-13

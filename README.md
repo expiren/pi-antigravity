@@ -187,6 +187,12 @@ extension restores a stable reference turn. Resume, fork, and tree navigation fo
 branch's attachment state. Deleted/explicitly omitted turns are not automatically resurrected,
 except when compaction removed the source turn.
 
+Each successfully injected attachment includes its name and a short model-visible note:
+“The file content is included in this request; answer directly from the attachment.”
+This does not claim successful backend decoding or restrict tools. Missing files or byte-budget
+failures receive an unavailable marker, not a success note.
+There is no separate cloud upload/readiness step or fixed parsing delay.
+
 Unchanged file contents are cached locally; changes trigger a fresh read, and missing/invalid
 files produce an explicit unavailable marker rather than silently sending stale bytes. **Contents
 still travel with every request**: this is not a Files API upload or a server-side cache. Reopening

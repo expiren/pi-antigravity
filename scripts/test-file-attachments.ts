@@ -103,6 +103,12 @@ function images(messages: ContextEvent["messages"]): ImageContent[] {
     ? message.content.filter((b) => b.type === "image") : []);
 }
 
+function attachmentGuidance(messages: ContextEvent["messages"]): string[] {
+  return messages.flatMap((message) => message.role === "user" && Array.isArray(message.content)
+    ? message.content.flatMap((b) => b.type === "text" && b.text.startsWith("[File attachment provided:")
+      ? [b.text] : []) : []);
+}
+
 function messages(h: ReturnType<typeof harness>): ContextEvent["messages"] {
   return h.branch().flatMap((e) => e.type === "message" ? [e.message] : []);
 }
@@ -175,6 +181,30 @@ try {
       expect(typeof raw[0].content).toBe("string");
       expect(JSON.stringify(h.branch())).not.toContain(bytes.toString("base64"));
       expect(await h.hydrate(hydrated)).toEqual(hydrated);
+    }
+  });
+
+  await check("model-visible guidance accompanies native/text payloads, with or without a mount prompt", async () => {
+    for (const file of ["report.PDF", "sound.m4a", "clip.mp4", "note.md"]) {
+      for (const prompt of ["", "Summarize this file"]) {
+        const h = harness();
+        await h.mount(`${file} ${prompt}`);
+        if (!prompt) h.user("What is in this file?");
+        const raw = messages(h);
+        const persisted = JSON.stringify(h.branch());
+        const hydrated = await h.hydrate(raw);
+        const guidance = attachmentGuidance(hydrated);
+        expect(guidance).toHaveLength(1);
+        expect(guidance[0]).toBe(`[File attachment provided: ${JSON.stringify(file)}]\nThe file content is included in this request; answer directly from the attachment.`);
+        const request = buildRequest(model, { messages: hydrated } as Context, "p", {}, model.id);
+        expect(request.request.contents.flatMap((turn) => turn.parts))
+          .toContainEqual({ text: guidance[0] });
+        expect(attachmentGuidance(raw)).toHaveLength(0);
+        expect(JSON.stringify(h.branch())).toBe(persisted);
+        expect(await h.hydrate(hydrated)).toEqual(hydrated);
+        h.user("Follow up");
+        expect(attachmentGuidance(await h.hydrate(messages(h)))).toEqual(guidance);
+      }
     }
   });
 
@@ -312,6 +342,7 @@ try {
       const hydrated = await h.hydrate([kept]);
       expect(hydrated).toHaveLength(2);
       expect(JSON.stringify(hydrated[0])).toContain("restored after context compaction");
+      expect(attachmentGuidance(hydrated)).toHaveLength(1);
       expect(await h.hydrate([kept])).toEqual(hydrated);
       expect(await h.hydrate(hydrated)).toEqual(hydrated);
       expect(h.branch().filter((e) => e.type === "custom")).toHaveLength(1);
@@ -416,14 +447,19 @@ try {
     await rm(path);
     const unavailable = await h.hydrate(raw);
     expect(images(unavailable)).toHaveLength(0);
+    expect(attachmentGuidance(unavailable)).toHaveLength(0);
     expect(JSON.stringify(unavailable)).toContain("attachment unavailable");
     const noticeCount = h.notices.length;
     await h.hydrate(raw);
     expect(h.notices).toHaveLength(noticeCount);
     await writeFile(path, "%PDF-restored-new");
-    expect(images(await h.hydrate(raw))[0].data).toBe(Buffer.from("%PDF-restored-new").toString("base64"));
+    const restored = await h.hydrate(raw);
+    expect(images(restored)[0].data).toBe(Buffer.from("%PDF-restored-new").toString("base64"));
+    expect(attachmentGuidance(restored)).toHaveLength(1);
     await writeFile(path, "invalid pdf");
-    expect(images(await h.hydrate(raw))).toHaveLength(0);
+    const invalid = await h.hydrate(raw);
+    expect(images(invalid)).toHaveLength(0);
+    expect(attachmentGuidance(invalid)).toHaveLength(0);
     expect(JSON.stringify(await h.hydrate(raw))).toContain("文件头");
   });
 
@@ -436,6 +472,7 @@ try {
       const raw = [source, huge];
       const result = await h.hydrate(raw);
       expect(images(result)).toHaveLength(0);
+      expect(attachmentGuidance(result)).toHaveLength(0);
       expect(JSON.stringify(result[0])).toContain("local inline context byte budget exceeded");
       expect(result[1]).toBe(huge);
       expect(typeof source.content).toBe("string");
