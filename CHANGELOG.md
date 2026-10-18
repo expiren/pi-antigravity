@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in `/file` attachments for Antigravity Gemini:** Mount a single PDF, image, audio/video, or UTF-8 text/code file with an optional question; inspect/detach with `status`/`clear`. Session state persists references only, follows the current branch, and restores the source attachment after compaction. Local fingerprint caching, bounded reads, lightweight media-header/UTF-8 validation, and byte budgets protect outbound context. Other models pause attachments; Office files are excluded. Pi's shell shortcuts are unchanged, with no standalone PDF compatibility layer.
+
+### Fixed
+
+- **M4A attachments:** Recognize `.m4a` as `audio/mp4` with MP4-container header validation, rather than treating it as raw AAC. Includes completion and request-serialization coverage.
+
 ## [1.0.1] - 2026-10-13
 
 ### Fixed

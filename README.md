@@ -16,6 +16,7 @@
 - [Quick start](#quick-start)
 - [Authentication and credential safety](#authentication-and-credential-safety)
 - [Commands](#commands)
+- [File attachments](#file-attachments)
 - [Models and routing](#models-and-routing)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
@@ -133,6 +134,8 @@ Review these permissions before approving access. If your credentials expire or 
 | `/antigravity models all` | Include tab/chat models normally hidden from the model list. |
 | `/antigravity doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 | `/antigravity.usage` | Compatibility alias of `/antigravity`. |
+| `/file <path> [question]` | Mount one local file for Antigravity Gemini; optionally send a question immediately. |
+| `/file status` / `/file clear` | Inspect or detach the current file attachment. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
@@ -145,6 +148,60 @@ The extension registers three built-in tools for Pi agents out of the box with *
 - **`url_context`**: Reads and summarizes public URLs. Features native YouTube multimodal understanding (Gemini processes video streams directly) alongside standard web page extraction.
 
 All search and analysis requests use Antigravity's fast, high-quota `gemini-3.7-flash` tier by default without consuming separate API keys.
+
+## File attachments
+
+Use `/file` to attach a local file to **Antigravity Gemini** conversations:
+
+```text
+/file "./documents/report.pdf" Summarize the key findings.
+/file ./recording.wav Transcribe this recording.
+/file ./src/index.ts
+/file status
+/file clear
+```
+
+Without a question, mounting does not start a model request; ask your question afterward.
+Paths resolve against the session's working directory, support `~/`, and can be single-
+or double-quoted when they contain spaces. Tab completion offers supported files and directories.
+Pi's `!` / `!!` shell shortcuts are untouched; there is no `!file:` input syntax.
+
+Supported inputs:
+
+- **PDF:** `.pdf`, sent natively as `application/pdf`.
+- **Images:** `.png`, `.jpg`, `.jpeg`, `.webp`, `.heic`, `.heif`.
+- **Audio:** `.wav`, `.mp3`, `.aif`, `.aiff`, `.aac`, `.m4a` (`audio/mp4`), `.ogg`, `.flac`.
+- **Video:** `.mp4`, `.mpeg`, `.mpg`, `.mov`, `.avi`, `.webm`, `.flv`, `.wmv`, `.3gp`.
+- **UTF-8 text:** plain text, Markdown, CSV/TSV, JSON/JSONL, XML/HTML, YAML/TOML,
+  common source-code/configuration files, Dockerfile and Makefile. Text is included as text,
+  not as an image or a binary attachment. Non-UTF-8 and NUL-containing text is rejected.
+
+**Office documents, archives, unknown binary formats, and multiple simultaneous attachments
+are not supported.** Mounting another file replaces the active attachment. Media MIME types
+follow Gemini's documented formats, but actual acceptance and duration/page/token limits depend
+on the Antigravity backend and selected model; not every media format has been live-verified.
+
+The session stores only the absolute path and reference metadata, never the file bytes. The
+attachment stays on the first user turn after mounting; if compaction removes that turn, the
+extension restores a stable reference turn. Resume, fork, and tree navigation follow the current
+branch's attachment state. Deleted/explicitly omitted turns are not automatically resurrected,
+except when compaction removed the source turn.
+
+Unchanged file contents are cached locally; changes trigger a fresh read, and missing/invalid
+files produce an explicit unavailable marker rather than silently sending stale bytes. **Contents
+still travel with every request**: this is not a Files API upload or a server-side cache. Reopening
+a session needs the original local file to remain accessible. Only attach files you intend to send
+to the model service.
+
+Local safety limits are **12 MiB per native file**, **1 MiB per text file**, and **18 MiB for the
+hydrated conversation JSON**, reserving room for the provider envelope/system prompt. These are
+local policies, not advertised server limits; large media should be split first. Mounting and
+detaching are blocked while the agent is running. On other models/providers, attachments are
+paused (not injected); switch back to Antigravity Gemini to resume. A question supplied while
+attachments are paused is not submitted.
+
+If you previously loaded the standalone `gemini-pdf.ts` extension, disable/remove it when enabling
+this bundled feature. There are no legacy commands or state migrations.
 
 ## Models and routing
 

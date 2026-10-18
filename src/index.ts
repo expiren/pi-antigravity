@@ -11,6 +11,7 @@ import {
 } from "./auth/index.js";
 import { DEFAULT_ENDPOINT } from "./client/index.js";
 import { registerAntigravityCommands } from "./commands/index.js";
+import { registerFileAttachments } from "./files/index.js";
 import { generateAntigravityImages } from "./image/index.js";
 import {
   ANTIGRAVITY_IMAGE_API,
@@ -96,4 +97,5 @@ export default function (pi: ExtensionAPI): void {
 
   registerAntigravityCommands(pi);
   registerAntigravityTools(pi);
+  registerFileAttachments(pi);
 }
