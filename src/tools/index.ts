@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { AnalyzeFileSchema, executeAnalyzeFile } from "../files/index.js";
 import {
   DEFAULT_IMAGE_MODEL,
   imageModelCandidates,
@@ -51,6 +52,32 @@ async function generateWithPreference(options: {
 }
 
 export function registerAntigravityTools(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "analyze_file",
+    label: "Analyze File",
+    description:
+      "Analyze a local PDF, audio, or video with Gemini via Antigravity when local reading is difficult. Specify exactly what to extract or produce and the desired format; returns only text, including code or structured data. Sends the file to Google without mounting it.",
+    promptSnippet:
+      "Analyze local PDFs, audio, and video with Gemini; return task-specific text or code",
+    promptGuidelines: [
+      "Use analyze_file for local PDFs, audio, or video that are difficult to read locally. Keep instruction scoped to the information or output you need. For public URLs or YouTube, use url_context.",
+      "Timestamps, verbatim transcription, speaker labels, and reconstructed layouts may be approximate. This tool does not extract original binary assets.",
+    ],
+    parameters: AnalyzeFileSchema,
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
+      if (!apiKey) throw new Error(NO_CREDENTIALS);
+      return executeAnalyzeFile({
+        apiKey,
+        cwd: ctx.cwd,
+        path: params.path,
+        instruction: params.instruction,
+        signal,
+        onUpdate,
+      });
+    },
+  });
+
   pi.registerTool({
     name: "generate_image",
     label: "Generate image",

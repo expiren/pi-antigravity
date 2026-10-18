@@ -141,13 +141,65 @@ Model availability, entitlement, quota groups, and resets are returned by the se
 
 ### Built-in Agent Tools
 
-The extension registers three built-in tools for Pi agents out of the box with **zero configuration**:
+The extension registers four built-in tools for Pi agents out of the box with **zero configuration**:
 
 - **`generate_image`**: Generates images via Gemini image models and saves them inside the project directory (default `.pi/generated-images/`). The same models are also registered as Pi 1.0 image models (`antigravity/gemini-3-pro-image`, `antigravity/gemini-3.1-flash-image`) for `models.generateImages` when codemode is on. That path can take reference images but does not save files or accept an aspect ratio; use this tool when either matters. Image models stay out of `/model` — Pi lists only chat models there.
 - **`web_search`**: Provider-native Google web search with Grounding. Injects byte-safe citations (`[1]`, `[2]`), automatically resolves Google redirect tracking links into canonical URLs, and lists verified sources.
 - **`url_context`**: Reads and summarizes public URLs. Features native YouTube multimodal understanding (Gemini processes video streams directly) alongside standard web page extraction.
 
-All search and analysis requests use Antigravity's fast, high-quota `gemini-3.7-flash` tier by default without consuming separate API keys.
+- **`analyze_file`**: Sends one local PDF, audio, or video to Gemini for task-specific extraction, transcription, questions, or reconstruction code. Takes only `path` and `instruction`; works independently of the main agent's model and does not change `/file` attachments.
+
+Search, URL context, and file analysis default to `gemini-3.8-flash-tiered` using your existing Antigravity OAuth login, without a separate API key. Availability, quotas, and latency depend on the backend.
+
+#### On-demand file analysis
+
+```text
+analyze_file({ path: "./recording.wav", instruction: "Return only the installation steps mentioned." })
+analyze_file({ path: "./reference.pdf", instruction: "Recreate page 1 as HTML with inline CSS. Return only the code." })
+```
+
+Paths resolve against the session working directory and support absolute paths and `~/`.
+The tool sends the file as `inlineData` in an isolated ordinary Gemini generation request,
+not a dedicated parsing API. Only the requested answer text returns to the main agent;
+no chat history, media bytes, or `/file` state are copied into that request or result.
+Existing manual attachments keep their original behavior, including repeated transmission.
+
+The request sets `includeThoughts: false` and `thinkingBudget: 0`. As a second layer,
+the tool excludes marked thought parts, binary output, tool calls, and protocol metadata, trims outer
+whitespace, and unwraps a single whole-answer code fence. It does not heuristically delete prose
+or rewrite requested code/data: the instruction and a short internal prompt ask Gemini to omit
+preambles and unrelated commentary. Empty, blocked, and interrupted responses fail explicitly;
+output limited by tokens or the local 64,000-character budget is marked incomplete.
+While waiting, elapsed-time status updates are emitted every five seconds and on endpoint retries,
+without exposing partial answers. File validation failures use analysis-specific English messages;
+manual `/file` diagnostics are unchanged.
+
+Instructions are limited to 32,000 characters, checked before reading the file.
+Local limits are 12 MiB per file, 18 MiB for the complete serialized request, and 180 seconds
+for the overall analysis operation. These are safety policies, not backend guarantees. The
+model is configurable with `ANTIGRAVITY_ANALYSIS_MODEL`; no automatic model switching is added.
+Shared endpoint fallback may resend the file. There is no Files API upload, slicing, transcoding,
+or cross-call media/result cache. Images, text files, and Office documents are outside this tool's scope.
+
+Returned timing details report local preparation, request-to-first-answer-text, request duration,
+and total analysis duration, starting after credential acquisition. Request timing includes serialization, connection/upload, backend work, and any
+endpoint retries; it does **not** independently measure upload, media processing, or generation.
+Try short audio/video first: acceptance of each container/codec requires live Antigravity testing.
+Transcripts, timestamps, speaker labels, and reconstructed layouts may be approximate; binary assets
+and internal model representations are not extracted.
+
+For an opt-in live check using your existing login (the supplied file is sent to Google):
+
+```bash
+bun scripts/smoke-analyze-file.ts ./short.wav "Return only the spoken words."
+```
+
+Development smoke checks against `daily-cloudcode-pa.googleapis.com` with the default model,
+including a rerun with thought output disabled and a zero thinking budget, successfully recognized
+speech in a short WAV, the red → blue sequence and speech in a 6-second H.264/AAC MP4, and
+requested invoice fields as JSON from a one-page PDF. These small samples establish basic
+acceptance, not codec coverage, transcript/timestamp accuracy, or complex-document quality
+with thinking disabled. They are not a latency guarantee.
 
 ## File attachments
 
@@ -260,7 +312,8 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_CALLBACK_HOST` | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`. |
 | `ANTIGRAVITY_USER_AGENT` | Override the request user-agent. |
 | `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing discovered/fallback routing. |
-| `ANTIGRAVITY_SEARCH_MODEL` | Override the search model ID (defaults to `gemini-3.7-flash-tiered`). |
+| `ANTIGRAVITY_SEARCH_MODEL` | Override the search model ID (defaults to `gemini-3.8-flash-tiered`). |
+| `ANTIGRAVITY_ANALYSIS_MODEL` | Gemini runtime model for `analyze_file` (defaults to `gemini-3.8-flash-tiered`), independent of the main agent and search model. |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | Override catalog refresh TTL in ms. Defaults to 4 hours (`14400000`). Set to `0` to always refresh. |
 | `ANTIGRAVITY_CLIENT_ID` | Use a custom Google OAuth client ID. |
 | `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history. |

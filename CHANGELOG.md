@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **`analyze_file(path, instruction)`:** Analyze a local PDF, audio, or video through an isolated Gemini request using existing OAuth and file validation. Returns task-specific text/code without mounting the file or forwarding media to the main agent; disables thought output with a zero thinking budget, filters thought/protocol parts, unwraps whole-answer code fences, and reports blocked, empty, interrupted, or truncated answers. Includes analysis-specific validation errors, instruction/request/output/time budgets, status heartbeats, timing details, and an independent `ANTIGRAVITY_ANALYSIS_MODEL` override. Manual `/file` behavior is unchanged; backend format support and latency require live testing.
 - **Built-in `/file` attachments for Antigravity Gemini:** Mount a single PDF, image, audio/video, or UTF-8 text/code file with an optional question; inspect/detach with `status`/`clear`. Session state persists references only, follows the current branch, and restores the source attachment after compaction. Local fingerprint caching, bounded reads, lightweight media-header/UTF-8 validation, and byte budgets protect outbound context. Other models pause attachments; Office files are excluded. Pi's shell shortcuts are unchanged, with no standalone PDF compatibility layer.
 
 ### Fixed

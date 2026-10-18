@@ -1,4 +1,5 @@
 import { basename, extname } from "node:path";
+import { FileValidationError } from "./errors.js";
 
 export interface FileFormat {
   kind: "text" | "inline";
@@ -117,5 +118,6 @@ export function validateInlineFile(bytes: Buffer, mimeType: string): void {
       valid = has("\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c");
       break;
   }
-  if (!valid) throw new Error(`文件头与 ${mimeType} 不符，不能挂载。`);
+  if (!valid)
+    throw new FileValidationError("INVALID_HEADER", `文件头与 ${mimeType} 不符，不能挂载。`);
 }

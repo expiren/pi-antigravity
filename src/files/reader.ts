@@ -1,6 +1,7 @@
 import { constants, type Stats } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { TextDecoder } from "node:util";
+import { FileValidationError } from "./errors.js";
 import { getFileFormat, validateInlineFile, type FileFormat } from "./formats.js";
 
 // Local safety policies, not claimed Antigravity server limits.
@@ -39,13 +40,18 @@ export class AttachmentReader {
 
   private async read(absPath: string): Promise<LoadedFile> {
     const format = getFileFormat(absPath);
-    if (!format) throw new Error("不支持此文件类型；Office、压缩包和未知二进制文件暂不支持。");
+    if (!format)
+      throw new FileValidationError(
+        "UNSUPPORTED_TYPE",
+        "不支持此文件类型；Office、压缩包和未知二进制文件暂不支持。",
+      );
     const s = await stat(absPath);
-    if (!s.isFile()) throw new Error("请选择普通文件。");
-    if (s.size === 0) throw new Error("文件为空。");
+    if (!s.isFile()) throw new FileValidationError("NOT_REGULAR_FILE", "请选择普通文件。");
+    if (s.size === 0) throw new FileValidationError("EMPTY_FILE", "文件为空。");
     const limit = format.kind === "text" ? MAX_TEXT_BYTES : MAX_FILE_BYTES;
     if (s.size > limit) {
-      throw new Error(
+      throw new FileValidationError(
+        "FILE_TOO_LARGE",
         format.kind === "text"
           ? "文本超过本地 1 MiB 安全上限，请拆分文件。"
           : "文件超过本地 12 MiB 安全上限（Base64 后约 16 MiB），请拆分文件。",
@@ -59,7 +65,7 @@ export class AttachmentReader {
     try {
       const before = await file.stat();
       if (!before.isFile() || fingerprint(before) !== key) {
-        throw new Error("文件正在变化，请稍后重试。");
+        throw new FileValidationError("FILE_CHANGED", "文件正在变化，请稍后重试。");
       }
       // Bound allocation and reads even when another process grows the file.
       const bytes = Buffer.alloc(s.size + 1);
@@ -74,7 +80,7 @@ export class AttachmentReader {
         fingerprint(await file.stat()) !== key ||
         fingerprint(await stat(absPath)) !== key
       ) {
-        throw new Error("文件在读取时发生变化，请重试。");
+        throw new FileValidationError("FILE_CHANGED", "文件在读取时发生变化，请重试。");
       }
       const content = bytes.subarray(0, length);
       let data: string;
@@ -82,9 +88,10 @@ export class AttachmentReader {
         try {
           data = new TextDecoder("utf-8", { fatal: true }).decode(content);
         } catch {
-          throw new Error("文本必须使用 UTF-8 编码。");
+          throw new FileValidationError("INVALID_UTF8", "文本必须使用 UTF-8 编码。");
         }
-        if (data.includes("\0")) throw new Error("文本包含 NUL 字节，疑似二进制文件。");
+        if (data.includes("\0"))
+          throw new FileValidationError("BINARY_TEXT", "文本包含 NUL 字节，疑似二进制文件。");
       } else {
         validateInlineFile(content, format.mimeType);
         data = content.toString("base64");

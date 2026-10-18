@@ -8,9 +8,9 @@ import { antigravityHeaders, endpointCandidates, jsonOrTextError, parseApiKey } 
  * One Cloud Code `streamGenerateContent` call.
  *
  * Owns the envelope, endpoint fallback, and SSE framing. It does not choose a
- * model, rotate accounts, or interpret candidates. Image generation and
- * `web_search` / `url_context` both call this; model preference order, grounding,
- * citations, and YouTube handling stay with the callers.
+ * model, rotate accounts, or interpret candidates. Image generation,
+ * `web_search`, `url_context`, and `analyze_file` call this; model selection,
+ * grounding, citations, and file handling stay with the callers.
  */
 export const STREAM_GENERATE_CONTENT_PATH = "/v1internal:streamGenerateContent?alt=sse";
 
@@ -148,6 +148,8 @@ export async function streamGenerateContent(options: {
   apiKey: string;
   model: string;
   request: StreamGenerateRequest;
+  /** Optional local safety budget for the complete serialized request envelope. */
+  maxRequestBytes?: number;
   signal?: AbortSignal;
   /** Search and URL context stream text from here. Image generation ignores it. */
   onChunk?: (chunk: StreamGenerateChunk) => void;
@@ -181,6 +183,11 @@ export async function streamGenerateContent(options: {
     userAgent: AntigravityUserAgent.Antigravity,
     requestId: envelope.requestId,
   });
+  if (options.maxRequestBytes !== undefined && Buffer.byteLength(body) > options.maxRequestBytes) {
+    return failure(
+      "Serialized request exceeds the local byte budget; use a smaller file or instruction.",
+    );
+  }
   const headers = {
     ...antigravityHeaders(creds.token),
     Accept: "text/event-stream",
