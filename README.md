@@ -92,7 +92,7 @@ again and complete Google sign-in with the other account. Manage and switch acco
 
 - **`[1 账号]` Accounts & Quotas:** Opens immediately with progressive quota loading. Shows two-row barcode sparklines (`▰▰▰▰▱`) per account for Gemini and Claude/GPT pools across 5h and weekly windows. Press `Enter` to switch account, `r` to refresh quotas, `d` then `y` to unlink.
 - **`[2 模型]` Models & Catalog Sync:** Displays available runtime models with quota bars, reset countdowns, and capability tags. Models and their per-model quota appear as soon as the first endpoint responds; slower endpoints fill in additional models without waiting for subscription or aggregate-quota RPCs. Listing and Pi catalog refresh share concurrent requests. Press `r` or `Enter` to sync/refresh the dynamic model catalog into Pi, or `a` to toggle internal `tab_`/`chat_` models.
-- **`[3 工具]` Tool Activation Management:** View and toggle built-in agent tools (`web_search`, `url_context`, `generate_image`, `analyze_file`). Press `Space`/`Enter` to toggle individual tools or `a` to toggle all. Changes take effect immediately in the current session and persist in `~/.pi/agent/antigravity-settings.json`.
+- **`[3 工具]` Tool Activation Management:** View and toggle built-in agent tools (`web_search`, `url_context`, `generate_image`, `analyze_file`). Press `Space`/`Enter` to toggle individual tools or `a` to toggle all. Changes take effect immediately in the current session and persist in `~/.pi/agent/pi-antigravity.json`.
 - **`[4 诊断]` Diagnostics (Doctor):** Inspect sanitized provider diagnostics, active account/tool state, endpoint status, latency, and resolved runtime model.
 
 Account credentials and quota are loaded on demand when visiting Accounts or Models; Tools and Diagnostics do not trigger those network calls. Auxiliary account RPCs have a five-second total timeout per fallback chain, and subscription-required quota errors are not retried across endpoints.
@@ -108,9 +108,9 @@ The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credential
 1. `/login antigravity` opens Google sign-in and starts a temporary callback listener at `http://localhost:51121/oauth-callback`.
 2. After you approve access, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
 3. Pi refreshes access tokens automatically when they expire — you shouldn't need to sign in again unless a token is revoked.
-4. Successful logins and token rotations are also kept in `~/.pi/agent/antigravity-accounts.json` with owner-only permissions so linked accounts can be switched without re-authenticating.
+4. Successful logins and token rotations are also kept alongside tool preferences in `~/.pi/agent/pi-antigravity.json` with owner-only (`0600`) permissions so linked accounts can be switched without re-authenticating. An existing `antigravity-accounts.json` is automatically merged into this store and removed only after a successful write.
 
-The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and account files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
+The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and settings files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
 
 Signing in requests these Google OAuth scopes:
 

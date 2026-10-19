@@ -1,9 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { AnalyzeFileSchema, executeAnalyzeFile } from "../files/index.js";
+import { loadAntigravitySettings, updateAntigravitySettings } from "../settings.js";
 import {
   DEFAULT_IMAGE_MODEL,
   imageModelCandidates,
@@ -21,7 +19,6 @@ import {
 } from "../search/index.js";
 
 const NO_CREDENTIALS = "No Antigravity credentials. Run /login antigravity first.";
-const SETTINGS_FILE = "antigravity-settings.json";
 
 export type AntigravityToolName = "web_search" | "url_context" | "generate_image" | "analyze_file";
 
@@ -60,52 +57,23 @@ export const ANTIGRAVITY_TOOLS: readonly AntigravityToolMeta[] = [
 
 const KNOWN_TOOL_NAMES = new Set<string>(ANTIGRAVITY_TOOLS.map((t) => t.name));
 
-type ToolSettingsFile = {
-  version: 1;
-  disabledTools: AntigravityToolName[];
-};
-
 export type ToolActivationController = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">;
 
 const registeredToolDefinitions = new Map<AntigravityToolName, { defaultActive?: boolean }>();
-
-function agentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-}
-
-function settingsPath(): string {
-  return join(agentDir(), SETTINGS_FILE);
-}
 
 function isAntigravityToolName(value: unknown): value is AntigravityToolName {
   return typeof value === "string" && KNOWN_TOOL_NAMES.has(value);
 }
 
 export function loadDisabledTools(): Set<AntigravityToolName> {
-  const path = settingsPath();
-  if (!existsSync(path)) return new Set();
-  try {
-    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return new Set();
-    const list = (raw as { disabledTools?: unknown }).disabledTools;
-    if (!Array.isArray(list)) return new Set();
-    return new Set(list.filter(isAntigravityToolName));
-  } catch {
-    return new Set();
-  }
+  const list = loadAntigravitySettings().disabledTools;
+  return new Set(Array.isArray(list) ? list.filter(isAntigravityToolName) : []);
 }
 
 function saveDisabledTools(disabled: Iterable<AntigravityToolName>): void {
-  const dir = agentDir();
-  mkdirSync(dir, { recursive: true });
-  const path = settingsPath();
-  const tempPath = `${path}.${process.pid}.tmp`;
-  const payload: ToolSettingsFile = {
-    version: 1,
+  updateAntigravitySettings({
     disabledTools: [...new Set(disabled)].filter(isAntigravityToolName),
-  };
-  writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  renameSync(tempPath, path);
+  });
 }
 
 export function isAntigravityToolEnabled(name: AntigravityToolName): boolean {

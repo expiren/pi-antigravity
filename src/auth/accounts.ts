@@ -4,10 +4,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { defaultProjectId } from "../client/client.js";
+import { loadAntigravitySettings, updateAntigravitySettings } from "../settings.js";
 import type { AntigravityApiKey, AntigravityOAuthCredentials } from "../types/types.js";
 import { getApiKey, refreshAntigravityToken } from "./oauth.js";
 
-const ACCOUNTS_FILE = "antigravity-accounts.json";
 const AUTH_FILE = "auth.json";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
@@ -41,10 +41,6 @@ export type AccountAccess = {
 
 function agentDir(): string {
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-}
-
-function accountsPath(): string {
-  return join(agentDir(), ACCOUNTS_FILE);
 }
 
 function authPath(): string {
@@ -105,11 +101,11 @@ function normalizeStore(value: Record<string, unknown> | undefined): AccountsFil
 }
 
 export function loadAccountStore(): AccountsFile {
-  return normalizeStore(readJsonObject(accountsPath()));
+  return normalizeStore(loadAntigravitySettings());
 }
 
 function saveAccountStore(store: AccountsFile): void {
-  writePrivateJson(accountsPath(), store);
+  updateAntigravitySettings(store);
 }
 
 function accountIdFor(credentials: OAuthCredentials): string {
