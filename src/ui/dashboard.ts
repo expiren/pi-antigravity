@@ -25,6 +25,7 @@ import type { AccountUsage, ModelQuotaRow } from "../types/types.js";
 import {
   createThemeColorizer,
   deriveUniqueShortLabels,
+  fetchAccountModelsUsage,
   fetchAccountUsage,
   formatAccountsDashboard,
   formatQuotaBar,
@@ -78,6 +79,7 @@ export type DashboardResult =
   | { action: "close" };
 
 export type DashboardActions = {
+  onTabChange?: (tab: DashboardTabId) => void;
   onSwitchAccount?: (target: DashboardAccountRow) => void | Promise<void>;
   onRemoveAccount?: (target: DashboardAccountRow) => void | Promise<void>;
   onRefreshAccounts?: () => void | Promise<void>;
@@ -477,7 +479,9 @@ export class AntigravityDashboardComponent {
     if (this.settled || this.activeTab === tab) return;
     this.activeTab = tab;
     this.confirmDeleteIndex = undefined;
+    this.statusToast = undefined;
     this.invalidate();
+    this.actions.onTabChange?.(tab);
   }
 
   setStatus(text: string, tone: DashboardStatusToast["tone"] = "info"): void {
@@ -551,10 +555,7 @@ export class AntigravityDashboardComponent {
   private cycleTab(delta: number): void {
     const currentIdx = DASHBOARD_TABS.findIndex((t) => t.id === this.activeTab);
     const nextIdx = (currentIdx + delta + DASHBOARD_TABS.length) % DASHBOARD_TABS.length;
-    this.activeTab = DASHBOARD_TABS[nextIdx].id;
-    this.confirmDeleteIndex = undefined;
-    this.statusToast = undefined;
-    this.invalidate();
+    this.setTab(DASHBOARD_TABS[nextIdx].id);
   }
 
   handleInput(data: string): void {
@@ -915,92 +916,168 @@ async function runInteractiveDashboard(
   let requestRender: (() => void) | undefined;
   const sessionNotes: string[] = [];
 
-  const fetchAllAccountsUsage = (currentAccess: typeof access, currentRows: typeof rows) => {
-    const promises = currentAccess.map(async (account, index) => {
-      if (!account.apiKey) {
-        const errMsg = redactSecrets(account.error || "No credentials");
-        if (closed || !currentRows[index]) return;
-        currentRows[index].loading = false;
-        currentRows[index].error = errMsg;
-        component?.setRowError(index, errMsg);
-        return;
+  const controller = new AbortController();
+  let credentialLoad: Promise<void> | undefined;
+  const accountJobs = new Map<string, Promise<void>>();
+  const loadedAccounts = new Set<string>();
+  const loadedModels = new Set<string>();
+  const modelJobs = new Map<string, Promise<void>>();
+
+  // Credentials are also lazy: opening tools/doctor must not refresh OAuth tokens.
+  const ensureAccess = async (accountIds: string[]) => {
+    while (!closed) {
+      if (credentialLoad) {
+        await credentialLoad;
+        continue;
       }
-      try {
-        const usage = await runWithDiagnostics(() => fetchAccountUsage(account.apiKey), {
-          commit: account.active,
-        });
-        if (closed || !currentRows[index]) return;
-        currentRows[index].loading = false;
-        currentRows[index].error = undefined;
-        currentRows[index].usage = usage;
-        component?.updateRowUsage(index, usage);
-        if (account.active) {
-          component?.updateDoctor(buildDoctorSnapshot(options?.pi));
-        }
-      } catch (error) {
-        if (closed || !currentRows[index]) return;
-        const msg = redactSecrets(error instanceof Error ? error.message : String(error));
-        currentRows[index].loading = false;
-        currentRows[index].error = msg;
-        component?.setRowError(index, msg);
-      }
-    });
-    promises.forEach((p) => {
-      void p.then(() => {
-        if (!closed) requestRender?.();
+      const missing = accountIds.filter((id) => {
+        const account = access.find((a) => a.accountId === id);
+        return account && !account.apiKey && !account.error;
       });
-    });
+      if (missing.length === 0) return;
+      credentialLoad = readAccountApiKeys(missing)
+        .then((fresh) => {
+          for (const account of fresh) {
+            const existing = access.find((a) => a.accountId === account.accountId);
+            if (existing) Object.assign(existing, account);
+          }
+        })
+        .finally(() => {
+          credentialLoad = undefined;
+        });
+      await credentialLoad;
+    }
   };
 
-  const refreshActiveModels = async () => {
-    const activeIdx = rows.findIndex((r) => r.active);
-    const targetIdx = activeIdx >= 0 ? activeIdx : 0;
-    const targetAccess = access[targetIdx];
-    if (!targetAccess?.apiKey) {
-      component?.setStatus("当前无可用账号凭证，请先执行 /login antigravity", "warning");
-      requestRender?.();
-      return;
-    }
+  const publish = (accountId: string, usage: AccountUsage, modelsOnly = false) => {
+    if (closed) return;
+    const index = rows.findIndex((r) => r.accountId === accountId);
+    if (index < 0) return;
+    const previous = rows[index].usage;
+    const merged =
+      modelsOnly && previous ? { ...previous, ...usage, groups: previous.groups } : usage;
+    component?.updateRowUsage(index, merged);
+    requestRender?.();
+  };
 
+  const refreshAccounts = async (force = false) => {
+    try {
+      const targets = rows.filter((r) => force || !loadedAccounts.has(r.accountId));
+      if (force) {
+        for (const account of access) account.error = undefined;
+      }
+      await ensureAccess(targets.map((r) => r.accountId));
+      if (closed) return;
+      await Promise.all(
+        targets.map((row) => {
+          const pending = accountJobs.get(row.accountId);
+          if (pending) return pending;
+          const job = Promise.resolve().then(async () => {
+            try {
+              const account = access.find((a) => a.accountId === row.accountId);
+              if (!account?.apiKey) throw new Error(account?.error || "No credentials");
+              const usage = await runWithDiagnostics(
+                () =>
+                  fetchAccountUsage(account.apiKey, {
+                    signal: controller.signal,
+                    onUpdate: (update) => publish(account.accountId, update, true),
+                  }),
+                { commit: account.active },
+              );
+              publish(account.accountId, usage);
+              loadedAccounts.add(account.accountId);
+              loadedModels.add(account.accountId);
+            } catch (error) {
+              if (closed) return;
+              const index = rows.indexOf(row);
+              if (index >= 0) component?.setRowError(index, redactSecrets(String(error)));
+            } finally {
+              accountJobs.delete(row.accountId);
+              if (!closed) requestRender?.();
+            }
+          });
+          accountJobs.set(row.accountId, job);
+          return job;
+        }),
+      );
+      if (!closed) component?.updateDoctor(buildDoctorSnapshot(options?.pi));
+    } catch (error) {
+      if (!closed) {
+        component?.setStatus(`⚠ 凭证读取失败: ${redactSecrets(String(error))}`, "warning");
+        requestRender?.();
+      }
+    }
+  };
+
+  const refreshActiveModels = async (target: DashboardAccountRow) => {
     component?.setModelsRefreshing(true);
     component?.setStatus("⟳ 正在同步 Antigravity 模型目录与配额…", "info");
     requestRender?.();
-
-    const catalogRes = await refreshModelCatalog(ctx, targetAccess.apiKey);
-    if (closed) return;
-
     try {
-      const usage = await runWithDiagnostics(() => fetchAccountUsage(targetAccess.apiKey), {
-        commit: true,
-      });
+      const existingAccess = access.find((a) => a.accountId === target.accountId);
+      if (existingAccess) existingAccess.error = undefined;
+      await ensureAccess([target.accountId]);
       if (closed) return;
-      if (rows[targetIdx]) {
-        rows[targetIdx].loading = false;
-        rows[targetIdx].error = undefined;
-        rows[targetIdx].usage = usage;
-        component?.updateRowUsage(targetIdx, usage);
-      }
+      const account = access.find((a) => a.accountId === target.accountId);
+      if (!account?.apiKey) throw new Error(account?.error || "No credentials");
+      // Listing and Pi registry refresh share one catalog probe. Publish each
+      // endpoint immediately instead of waiting for slow sandbox responses.
+      const usagePromise = runWithDiagnostics(
+        () =>
+          fetchAccountModelsUsage(account.apiKey, {
+            signal: controller.signal,
+            onUpdate: (usage) => publish(account.accountId, usage, true),
+          }),
+        { commit: true },
+      );
+      const [usage, catalogRes] = await Promise.all([
+        usagePromise,
+        refreshModelCatalog(ctx, account.apiKey),
+      ]);
+      if (closed) return;
+      publish(account.accountId, usage, true);
+      loadedModels.add(account.accountId);
       component?.updateDoctor(buildDoctorSnapshot(options?.pi));
-      component?.setModelsRefreshing(false);
-      if (catalogRes.ok) {
-        component?.setStatus(
-          `✓ 模型目录与配额已同步（共 ${usage.models.length} 个模型）`,
-          "success",
-        );
-      } else {
-        component?.setStatus(`⚠ 模型目录同步警告: ${catalogRes.error}`, "warning");
-      }
+      component?.setStatus(
+        catalogRes.ok
+          ? `✓ 模型目录与配额已同步（共 ${usage.models.length} 个模型）`
+          : `⚠ 模型目录同步警告: ${catalogRes.error}`,
+        catalogRes.ok ? "success" : "warning",
+      );
     } catch (error) {
-      if (closed) return;
-      const msg = redactSecrets(error instanceof Error ? error.message : String(error));
-      component?.setModelsRefreshing(false);
-      component?.setStatus(`⚠ 配额获取失败: ${msg}`, "warning");
+      if (!closed) {
+        const msg = redactSecrets(String(error));
+        const index = rows.indexOf(target);
+        if (index >= 0) component?.setRowError(index, msg);
+        component?.setStatus(`⚠ 模型获取失败: ${msg}`, "warning");
+      }
+    } finally {
+      if (!closed) {
+        component?.setModelsRefreshing(modelJobs.size > 1);
+        requestRender?.();
+      }
     }
-    requestRender?.();
   };
 
-  // Start background fetch for all accounts in parallel immediately
-  fetchAllAccountsUsage(access, rows);
+  const refreshModels = () => {
+    const target = rows.find((r) => r.active) ?? rows[0];
+    if (!target) return Promise.resolve();
+    const pending = modelJobs.get(target.accountId);
+    if (pending) return pending;
+    const job = refreshActiveModels(target).finally(() => {
+      modelJobs.delete(target.accountId);
+    });
+    modelJobs.set(target.accountId, job);
+    return job;
+  };
+
+  const loadTab = (tab: DashboardTabId) => {
+    if (tab === "accounts") void refreshAccounts();
+    if (tab === "models") {
+      const active = rows.find((r) => r.active) ?? rows[0];
+      if (active && !loadedModels.has(active.accountId)) void refreshModels();
+    }
+  };
 
   const result = await ctx.ui.custom<DashboardResult>((tui, theme, kb, done) => {
     requestRender = () => {
@@ -1021,6 +1098,7 @@ async function runInteractiveDashboard(
         tools: getAntigravityToolStates(),
         doctor: buildDoctorSnapshot(options?.pi),
         actions: {
+          onTabChange: loadTab,
           onSwitchAccount: async (target) => {
             if (target.active) {
               component?.setStatus(`当前已处于账号 ${target.shortLabel}`, "info");
@@ -1047,7 +1125,9 @@ async function runInteractiveDashboard(
           },
           onRemoveAccount: async (target) => {
             const remaining = await removeAccount(String(target.index));
-            access = await readAccountApiKeys();
+            access = listAccounts();
+            loadedAccounts.clear();
+            loadedModels.clear();
             const shortLabelMap = deriveUniqueShortLabels(access);
             const usageByAccount = new Map(rows.map((r) => [r.accountId, r]));
             rows = access.map((acc, idx) => {
@@ -1074,7 +1154,7 @@ async function runInteractiveDashboard(
             );
             requestRender?.();
           },
-          onRefreshAccounts: () => {
+          onRefreshAccounts: async () => {
             for (const row of rows) {
               row.loading = true;
               row.error = undefined;
@@ -1082,10 +1162,10 @@ async function runInteractiveDashboard(
             component?.updateRows(rows);
             component?.setStatus("⟳ 正在刷新全部账号配额…", "info");
             requestRender?.();
-            fetchAllAccountsUsage(access, rows);
+            await refreshAccounts(true);
           },
           onRefreshModels: async () => {
-            await refreshActiveModels();
+            await refreshModels();
           },
           onToggleTool: (toolName) => {
             const enabled = toggleAntigravityTool(toolName, options?.pi);
@@ -1122,13 +1202,12 @@ async function runInteractiveDashboard(
       },
     );
 
-    if (options?.initialTab === "models") {
-      void refreshActiveModels();
-    }
+    loadTab(options?.initialTab ?? "accounts");
 
     return component;
   });
   closed = true;
+  controller.abort();
 
   if (sessionNotes.length > 0) {
     emitCommandOutput(ctx, sessionNotes[sessionNotes.length - 1]);
@@ -1213,7 +1292,8 @@ export async function runAccountsDashboard(
   ctx: ExtensionCommandContext,
   options?: RunDashboardOptions,
 ): Promise<void> {
-  const access = await readAccountApiKeys();
+  const interactive = ctx.hasUI && ctx.mode === "tui";
+  const access = interactive ? listAccounts() : await readAccountApiKeys();
   const shortLabelMap = deriveUniqueShortLabels(access);
   const rows: DashboardAccountRow[] = access.map((acc, index) => ({
     index: index + 1,

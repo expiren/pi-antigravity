@@ -300,7 +300,7 @@ export async function getActiveApiKey(): Promise<AntigravityApiKey> {
  * A rotated refresh token is persisted; `lastUsedAt` and `auth.json` stay put unless the
  * already-active access token itself had to be refreshed.
  */
-export async function readAccountApiKeys(): Promise<AccountAccess[]> {
+export async function readAccountApiKeys(accountIds?: readonly string[]): Promise<AccountAccess[]> {
   syncCurrentAuth();
   const store = loadAccountStore();
   const activeId = store.activeAccountId;
@@ -309,6 +309,7 @@ export async function readAccountApiKeys(): Promise<AccountAccess[]> {
   const rows: AccountAccess[] = [];
 
   for (const existing of sortedAccounts(store)) {
+    if (accountIds && !accountIds.includes(existing.accountId)) continue;
     const active = existing.accountId === activeId;
     try {
       const fresh = await ensureFresh(existing);

@@ -91,9 +91,11 @@ again and complete Google sign-in with the other account. Manage and switch acco
 `/antigravity` opens a multi-tab, zero-latency interactive Control Center (`Tab` / `Shift+Tab`, `←`/`→`, or `1`–`4` to switch tabs):
 
 - **`[1 账号]` Accounts & Quotas:** Opens immediately with progressive quota loading. Shows two-row barcode sparklines (`▰▰▰▰▱`) per account for Gemini and Claude/GPT pools across 5h and weekly windows. Press `Enter` to switch account, `r` to refresh quotas, `d` then `y` to unlink.
-- **`[2 模型]` Models & Catalog Sync:** Displays available runtime models with quota bars, reset countdowns, and capability tags. Press `r` or `Enter` to sync/refresh the dynamic model catalog into Pi, or `a` to toggle internal `tab_`/`chat_` models.
+- **`[2 模型]` Models & Catalog Sync:** Displays available runtime models with quota bars, reset countdowns, and capability tags. Models and their per-model quota appear as soon as the first endpoint responds; slower endpoints fill in additional models without waiting for subscription or aggregate-quota RPCs. Listing and Pi catalog refresh share concurrent requests. Press `r` or `Enter` to sync/refresh the dynamic model catalog into Pi, or `a` to toggle internal `tab_`/`chat_` models.
 - **`[3 工具]` Tool Activation Management:** View and toggle built-in agent tools (`web_search`, `url_context`, `generate_image`, `analyze_file`). Press `Space`/`Enter` to toggle individual tools or `a` to toggle all. Changes take effect immediately in the current session and persist in `~/.pi/agent/antigravity-settings.json`.
 - **`[4 诊断]` Diagnostics (Doctor):** Inspect sanitized provider diagnostics, active account/tool state, endpoint status, latency, and resolved runtime model.
+
+Account credentials and quota are loaded on demand when visiting Accounts or Models; Tools and Diagnostics do not trigger those network calls. Auxiliary account RPCs have a five-second total timeout per fallback chain, and subscription-required quota errors are not retried across endpoints.
 
 Outside the terminal UI, the same command prints the dashboard. If a dialog UI is available, it then opens a selector to switch.
 

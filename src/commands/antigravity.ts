@@ -1,7 +1,11 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { runWithDiagnostics } from "../diagnostics/index.js";
 import { getAntigravityToolStates } from "../tools/index.js";
-import { fetchAccountUsage, formatModelsList, resolveApiKeyFromContext } from "../usage/index.js";
+import {
+  fetchAccountModelsUsage,
+  formatModelsList,
+  resolveApiKeyFromContext,
+} from "../usage/index.js";
 import {
   buildDoctorSnapshot,
   emitCommandOutput,
@@ -47,13 +51,14 @@ async function handleModelsCommand(
   const apiKey = await resolveCredentials(ctx);
   if (!apiKey) return;
   if (ctx.hasUI) ctx.ui.notify("Refreshing Antigravity models…", "info");
-  const catalogRes = await refreshModelCatalog(ctx, apiKey);
-  if (!catalogRes.ok && catalogRes.error) {
-    // A refresh failure must not block listing what the account can already use.
-    emitCommandOutput(ctx, `Antigravity model refresh failed: ${catalogRes.error}`, "warning");
-  }
   try {
-    const usage = await runWithDiagnostics(() => fetchAccountUsage(apiKey));
+    const [usage, catalogRes] = await Promise.all([
+      runWithDiagnostics(() => fetchAccountModelsUsage(apiKey)),
+      refreshModelCatalog(ctx, apiKey),
+    ]);
+    if (!catalogRes.ok && catalogRes.error) {
+      emitCommandOutput(ctx, `Antigravity model refresh failed: ${catalogRes.error}`, "warning");
+    }
     emitCommandOutput(ctx, formatModelsList(usage, opts));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

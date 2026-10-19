@@ -69,11 +69,19 @@ function jsonHeaders(token: string): Record<string, string> {
   };
 }
 
+const AUXILIARY_TIMEOUT_MS = 5_000;
+
+class NonRetryableRpcError extends Error {}
+
 async function postJson(
   path: string,
   token: string,
   body: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ endpoint: string; status: number; data: unknown }> {
+  // One budget for the entire fallback chain, including response body reads.
+  const timeout = AbortSignal.timeout(AUXILIARY_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let lastErrorText = "";
   for (const endpoint of endpointCandidates()) {
     try {
@@ -81,6 +89,7 @@ async function postJson(
         method: "POST",
         headers: jsonHeaders(token),
         body: JSON.stringify(body),
+        signal: requestSignal,
       });
       setLastEndpoint(endpoint);
       setLastStatus(res.status);
@@ -95,8 +104,13 @@ async function postJson(
         const errorBody = isRecord(data) ? (data as ApiErrorBody) : undefined;
         lastErrorText =
           typeof errorBody?.error?.message === "string" ? errorBody.error.message : text;
-        if (![403, 404, 429, 500, 502, 503, 504].includes(res.status)) {
-          throw new Error(`${path} failed (${String(res.status)}): ${lastErrorText.slice(0, 300)}`);
+        if (
+          ![403, 404, 429, 500, 502, 503, 504].includes(res.status) ||
+          /SUBSCRIPTION_REQUIRED|#3501|(?:lack|missing).*license/i.test(lastErrorText)
+        ) {
+          throw new NonRetryableRpcError(
+            `${path} failed (${String(res.status)}): ${lastErrorText.slice(0, 300)}`,
+          );
         }
         continue;
       }
@@ -104,6 +118,7 @@ async function postJson(
     } catch (error) {
       lastErrorText = safeError(error);
       setLastError(lastErrorText);
+      if (requestSignal.aborted || error instanceof NonRetryableRpcError) throw error;
     }
   }
   throw new Error(`${path} failed: ${lastErrorText || "no endpoint available"}`);
@@ -194,15 +209,20 @@ function parseTier(value: unknown): TierInfo | undefined {
   };
 }
 
-async function loadCodeAssistSafe(token: string) {
+async function loadCodeAssistSafe(token: string, signal?: AbortSignal) {
   try {
-    return await postJson("/v1internal:loadCodeAssist", token, {
-      metadata: {
-        ideType: "ANTIGRAVITY",
-        platform: "PLATFORM_UNSPECIFIED",
-        pluginType: "GEMINI",
+    return await postJson(
+      "/v1internal:loadCodeAssist",
+      token,
+      {
+        metadata: {
+          ideType: "ANTIGRAVITY",
+          platform: "PLATFORM_UNSPECIFIED",
+          pluginType: "GEMINI",
+        },
       },
-    });
+      signal,
+    );
   } catch {
     return null;
   }
@@ -213,7 +233,10 @@ async function loadCodeAssistSafe(token: string) {
  * accounts get 403 SUBSCRIPTION_REQUIRED (#3501). It is best-effort diagnostics
  * only — never let it block the rest of the account data (models, tier, project).
  */
-async function fetchQuotaSummarySafe(token: string): Promise<
+async function fetchQuotaSummarySafe(
+  token: string,
+  signal?: AbortSignal,
+): Promise<
   | { ok: true; result: { endpoint: string; status: number; data: unknown } }
   | {
       ok: false;
@@ -221,7 +244,10 @@ async function fetchQuotaSummarySafe(token: string): Promise<
     }
 > {
   try {
-    return { ok: true, result: await postJson("/v1internal:retrieveUserQuotaSummary", token, {}) };
+    return {
+      ok: true,
+      result: await postJson("/v1internal:retrieveUserQuotaSummary", token, {}, signal),
+    };
   } catch (error) {
     const msg = safeError(error);
     setLastError(msg);
@@ -229,21 +255,48 @@ async function fetchQuotaSummarySafe(token: string): Promise<
   }
 }
 
-export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {
-  const creds = parseApiKey(apiKeyRaw);
-  const initialProjectId =
-    creds.projectId ||
-    resolveProjectId({
-      token: creds.token,
-      credentialProjectId: creds.projectId,
-    });
+export type UsageFetchOptions = {
+  signal?: AbortSignal;
+  onUpdate?: (usage: AccountUsage) => void;
+};
 
-  // Fetch loadCodeAssist, quota summary, and available models all in parallel
-  // to minimize command execution latency.
-  const [assistResult, summaryRes, available] = await Promise.all([
-    loadCodeAssistSafe(creds.token),
-    fetchQuotaSummarySafe(creds.token),
-    fetchAvailableModelsCatalog(creds.token, initialProjectId),
+/** Model listing needs only fetchAvailableModels, which already contains quotaInfo. */
+export async function fetchAccountModelsUsage(
+  apiKeyRaw?: string,
+  options?: UsageFetchOptions,
+): Promise<AccountUsage> {
+  const creds = parseApiKey(apiKeyRaw);
+  const projectId = resolveProjectId({ token: creds.token, credentialProjectId: creds.projectId });
+  const toUsage = (
+    available: Awaited<ReturnType<typeof fetchAvailableModelsCatalog>>,
+  ): AccountUsage => ({
+    projectId,
+    endpoint: available.endpoint,
+    groups: [],
+    ...parseModels(available.data),
+    fetchedAt: Date.now(),
+  });
+  const available = await fetchAvailableModelsCatalog(
+    creds.token,
+    projectId,
+    options?.signal,
+    (result) => options?.onUpdate?.(toUsage(result)),
+  );
+  setLastProjectId(projectId);
+  return toUsage(available);
+}
+
+export async function fetchAccountUsage(
+  apiKeyRaw?: string,
+  options?: UsageFetchOptions,
+): Promise<AccountUsage> {
+  const creds = parseApiKey(apiKeyRaw);
+  // Render models as soon as any endpoint succeeds; auxiliary data must never
+  // gate the first usable account row. Final resolution still includes all data.
+  const [assistResult, summaryRes, modelUsage] = await Promise.all([
+    loadCodeAssistSafe(creds.token, options?.signal),
+    fetchQuotaSummarySafe(creds.token, options?.signal),
+    fetchAccountModelsUsage(apiKeyRaw, options),
   ]);
 
   // Derive project ID from the loadCodeAssist response or stored project ID.
@@ -260,7 +313,7 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
   const { groups, description } = summary
     ? parseQuotaSummary(summary.data)
     : { groups: [], description: undefined };
-  const { models, defaultAgentModelId } = parseModels(available.data);
+  const { models, defaultAgentModelId } = modelUsage;
 
   const assistData = (isRecord(assistResult?.data) ? assistResult.data : {}) as LoadCodeAssistRaw;
   const productTier = parseTier(assistData.currentTier);
@@ -276,7 +329,7 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
 
   return {
     projectId,
-    endpoint: summary?.endpoint ?? available.endpoint ?? assistResult?.endpoint,
+    endpoint: summary?.endpoint ?? modelUsage.endpoint ?? assistResult?.endpoint,
     productTier,
     paidTier,
     planLabel,
