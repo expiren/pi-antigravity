@@ -9,3 +9,4 @@ scripts/probe-tier-results.json
 scripts/smoke-all-models-results.json
 *.tgz
 *.m4a
+.index/

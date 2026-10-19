@@ -1,4 +1,7 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { AnalyzeFileSchema, executeAnalyzeFile } from "../files/index.js";
 import {
@@ -18,6 +21,178 @@ import {
 } from "../search/index.js";
 
 const NO_CREDENTIALS = "No Antigravity credentials. Run /login antigravity first.";
+const SETTINGS_FILE = "antigravity-settings.json";
+
+export type AntigravityToolName = "web_search" | "url_context" | "generate_image" | "analyze_file";
+
+export type AntigravityToolMeta = {
+  name: AntigravityToolName;
+  label: string;
+  summary: string;
+};
+
+export type AntigravityToolState = AntigravityToolMeta & {
+  enabled: boolean;
+};
+
+export const ANTIGRAVITY_TOOLS: readonly AntigravityToolMeta[] = [
+  {
+    name: "web_search",
+    label: "Web Search",
+    summary: "Google 联网搜索与实时信息检索",
+  },
+  {
+    name: "url_context",
+    label: "URL Context",
+    summary: "网页、文档与 YouTube 视频内容解析",
+  },
+  {
+    name: "generate_image",
+    label: "Generate Image",
+    summary: "Gemini 图像生成（保存至 .pi/generated-images/）",
+  },
+  {
+    name: "analyze_file",
+    label: "Analyze File",
+    summary: "本地 PDF、音频与视频多模态分析",
+  },
+];
+
+const KNOWN_TOOL_NAMES = new Set<string>(ANTIGRAVITY_TOOLS.map((t) => t.name));
+
+type ToolSettingsFile = {
+  version: 1;
+  disabledTools: AntigravityToolName[];
+};
+
+export type ToolActivationController = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">;
+
+const registeredToolDefinitions = new Map<AntigravityToolName, { defaultActive?: boolean }>();
+
+function agentDir(): string {
+  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+}
+
+function settingsPath(): string {
+  return join(agentDir(), SETTINGS_FILE);
+}
+
+function isAntigravityToolName(value: unknown): value is AntigravityToolName {
+  return typeof value === "string" && KNOWN_TOOL_NAMES.has(value);
+}
+
+export function loadDisabledTools(): Set<AntigravityToolName> {
+  const path = settingsPath();
+  if (!existsSync(path)) return new Set();
+  try {
+    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return new Set();
+    const list = (raw as { disabledTools?: unknown }).disabledTools;
+    if (!Array.isArray(list)) return new Set();
+    return new Set(list.filter(isAntigravityToolName));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDisabledTools(disabled: Iterable<AntigravityToolName>): void {
+  const dir = agentDir();
+  mkdirSync(dir, { recursive: true });
+  const path = settingsPath();
+  const tempPath = `${path}.${process.pid}.tmp`;
+  const payload: ToolSettingsFile = {
+    version: 1,
+    disabledTools: [...new Set(disabled)].filter(isAntigravityToolName),
+  };
+  writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  renameSync(tempPath, path);
+}
+
+export function isAntigravityToolEnabled(name: AntigravityToolName): boolean {
+  return !loadDisabledTools().has(name);
+}
+
+export function getAntigravityToolStates(): AntigravityToolState[] {
+  const disabled = loadDisabledTools();
+  return ANTIGRAVITY_TOOLS.map((tool) => ({
+    ...tool,
+    enabled: !disabled.has(tool.name),
+  }));
+}
+
+function syncDefinitionDefaultActive(disabled: Set<AntigravityToolName>): void {
+  for (const tool of ANTIGRAVITY_TOOLS) {
+    const def = registeredToolDefinitions.get(tool.name);
+    if (def) {
+      def.defaultActive = !disabled.has(tool.name);
+    }
+  }
+}
+
+function applyToolStatesToSession(
+  pi: ToolActivationController | undefined,
+  disabled: Set<AntigravityToolName>,
+  explicitToggle?: { names: AntigravityToolName[]; enabled: boolean },
+): void {
+  syncDefinitionDefaultActive(disabled);
+  if (!pi || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
+    return;
+  }
+  try {
+    const current = pi.getActiveTools();
+    const next = new Set(current);
+    for (const name of disabled) {
+      next.delete(name);
+    }
+    if (explicitToggle?.enabled) {
+      for (const name of explicitToggle.names) {
+        if (!disabled.has(name)) next.add(name);
+      }
+    }
+    const nextList = [...next];
+    if (nextList.length !== current.length || nextList.some((name, idx) => name !== current[idx])) {
+      pi.setActiveTools(nextList);
+    }
+  } catch {
+    // Host may not have bound the session tool registry yet during early load.
+  }
+}
+
+export function syncAntigravityToolsWithSession(pi?: ToolActivationController): void {
+  const disabled = loadDisabledTools();
+  applyToolStatesToSession(pi, disabled);
+}
+
+export function setAntigravityToolEnabled(
+  name: AntigravityToolName,
+  enabled: boolean,
+  pi?: ToolActivationController,
+): boolean {
+  const disabled = loadDisabledTools();
+  if (enabled) disabled.delete(name);
+  else disabled.add(name);
+  saveDisabledTools(disabled);
+  applyToolStatesToSession(pi, disabled, { names: [name], enabled });
+  return enabled;
+}
+
+export function toggleAntigravityTool(
+  name: AntigravityToolName,
+  pi?: ToolActivationController,
+): boolean {
+  const nextEnabled = !isAntigravityToolEnabled(name);
+  return setAntigravityToolEnabled(name, nextEnabled, pi);
+}
+
+export function setAllAntigravityToolsEnabled(
+  enabled: boolean,
+  pi?: ToolActivationController,
+): void {
+  const allNames = ANTIGRAVITY_TOOLS.map((t) => t.name);
+  const disabled = new Set<AntigravityToolName>(enabled ? [] : allNames);
+  saveDisabledTools(disabled);
+  applyToolStatesToSession(pi, disabled, { names: allNames, enabled });
+}
 
 type PreferredImage = { images: GeneratedImage[]; text: string[]; model: string };
 
@@ -51,8 +226,21 @@ async function generateWithPreference(options: {
   throw new Error(`Antigravity image generation failed: ${lastError}`);
 }
 
+function registerManagedTool<TParams extends ReturnType<typeof Type.Object>, TDetails = unknown>(
+  pi: ExtensionAPI,
+  name: AntigravityToolName,
+  definition: ToolDefinition<TParams, TDetails>,
+): void {
+  const managed: ToolDefinition<TParams, TDetails> = {
+    ...definition,
+    defaultActive: isAntigravityToolEnabled(name),
+  };
+  registeredToolDefinitions.set(name, managed);
+  pi.registerTool(managed);
+}
+
 export function registerAntigravityTools(pi: ExtensionAPI): void {
-  pi.registerTool({
+  registerManagedTool(pi, "analyze_file", {
     name: "analyze_file",
     label: "Analyze File",
     description:
@@ -78,7 +266,7 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerManagedTool(pi, "generate_image", {
     name: "generate_image",
     label: "Generate image",
     description:
@@ -133,7 +321,7 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerManagedTool(pi, "web_search", {
     name: "web_search",
     label: "Web Search",
     description:
@@ -156,7 +344,7 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerManagedTool(pi, "url_context", {
     name: "url_context",
     label: "URL Context",
     description:
@@ -178,4 +366,10 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
       });
     },
   });
+
+  if (typeof pi.on === "function") {
+    pi.on("session_start", () => {
+      syncAntigravityToolsWithSession(pi);
+    });
+  }
 }
