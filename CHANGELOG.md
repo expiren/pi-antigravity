@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Gemini 4 Argon discovery:** Update the default CLI User-Agent version from `1.2.4` to `1.4.2`. The backend omits Argon for the old version even with the same account and project; dynamic discovery now exposes its Low / Medium / High variants after `/antigravity models` refreshes the catalog.
 - **Attachment context guidance:** Successful `/file` injection now includes the filename and a one-sentence reminder to answer directly from the content already in the request, without restricting tools. Unavailable/over-budget attachments do not receive a success note; guidance also follows compaction restoration.
 - **M4A attachments:** Recognize `.m4a` as `audio/mp4` with MP4-container header validation, rather than treating it as raw AAC. Includes completion and request-serialization coverage.
 

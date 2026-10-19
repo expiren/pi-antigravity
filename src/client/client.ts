@@ -60,8 +60,9 @@ export function endpointCandidates(): string[] {
   return explicit ? [assertSafeApiBaseUrl(explicit)] : ENDPOINT_FALLBACKS;
 }
 
+// Catalog rollouts are gated by the CLI version (1.2.4 omits Gemini 4 Argon).
 const DEFAULT_USER_AGENT =
-  "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
+  "antigravity/cli/1.4.2 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
 
 /** Default User-Agent matching pure Antigravity CLI wire fingerprint. */
 export function defaultUserAgent(): string {
