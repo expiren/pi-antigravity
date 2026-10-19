@@ -1,7 +1,4 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-// Namespace import: Oh My Pi rewrites this specifier onto bundled pi-ai, which
-// does not export registerApiProvider. A static named import fails plugin load.
-import * as piAiCompat from "@earendil-works/pi-ai/compat";
 import {
   getApiKey,
   loginAntigravity,
@@ -15,11 +12,13 @@ import { registerFileAttachments } from "./files/index.js";
 import { generateAntigravityImages } from "./image/index.js";
 import {
   ANTIGRAVITY_IMAGE_API,
+  createPricingResolver,
   getCurrentAntigravityCatalog,
   listProviderModels,
   PROVIDER_ID,
   PROVIDER_NAME,
   refreshAntigravityModels,
+  type PricingSources,
 } from "./models/index.js";
 import { AccountCredentialSource } from "./runtime/index.js";
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
@@ -42,45 +41,26 @@ async function refreshAndRemember(
   return refreshed;
 }
 
-type CompatApiProviderRegistrar = (provider: {
-  api: typeof ANTIGRAVITY_API;
-  stream: typeof streamAntigravity;
-  streamSimple: typeof streamAntigravity;
-}) => void;
-
-const defaultCredentialSource = new AccountCredentialSource();
-
-const boundStreamAntigravity: typeof streamAntigravity = (model, context, options) =>
-  streamAntigravity(model, context, {
-    ...options,
-    credentialSource: options?.credentialSource ?? defaultCredentialSource,
-  });
-
-/**
- * Pi dispatches custom APIs through the compat registry. Oh My Pi does not
- * export `registerApiProvider` and registers the stream inside `registerProvider`.
- */
-function registerCompatApiProvider(): void {
-  const register = (piAiCompat as { registerApiProvider?: CompatApiProviderRegistrar })
-    .registerApiProvider;
-  if (typeof register !== "function") return;
-  register({
-    api: ANTIGRAVITY_API,
-    stream: boundStreamAntigravity,
-    streamSimple: boundStreamAntigravity,
-  });
-}
-
 export default function (pi: ExtensionAPI): void {
-  registerCompatApiProvider();
-
+  // Keep the context-owned registry private to this extension instance. Lookups are
+  // lazy so an already-selected model also sees prices refreshed during the session.
+  let registryLookup: PricingSources["find"];
+  const resolveCost = createPricingResolver({
+    find: (provider, id) => registryLookup?.(provider, id),
+  });
+  const defaultCredentialSource = new AccountCredentialSource();
+  const boundStreamAntigravity: typeof streamAntigravity = (model, context, options) =>
+    streamAntigravity(model, context, {
+      ...options,
+      credentialSource: options?.credentialSource ?? defaultCredentialSource,
+      pricingResolver: options?.pricingResolver ?? resolveCost,
+    });
   pi.registerProvider(PROVIDER_ID, {
     name: PROVIDER_NAME,
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
-    models: listProviderModels(getCurrentAntigravityCatalog()),
-    refreshModels: refreshAntigravityModels,
-    // Hosts that predate Pi 1.0 ignore this. generate_image then calls the local transport.
+    models: listProviderModels(getCurrentAntigravityCatalog(), resolveCost),
+    refreshModels: (context) => refreshAntigravityModels(context, resolveCost),
     images: {
       [ANTIGRAVITY_IMAGE_API]: {
         generateImages: generateAntigravityImages,
@@ -93,6 +73,13 @@ export default function (pi: ExtensionAPI): void {
       getApiKey,
     },
     streamSimple: boundStreamAntigravity,
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    registryLookup = (provider, id) => ctx.modelRegistry.find(provider, id);
+  });
+  pi.on("session_shutdown", () => {
+    registryLookup = undefined;
   });
 
   registerAntigravityCommands(pi);

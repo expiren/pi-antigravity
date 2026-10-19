@@ -3,6 +3,14 @@ import type { AntigravityRouting, ThinkingWire } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityCatalog } from "./grouping.js";
 import { ANTIGRAVITY_IMAGE_MODELS } from "./image-catalog.js";
+import {
+  claudeOpusCost,
+  claudeSonnetCost,
+  gemini35FlashCost,
+  gemini38FlashCost,
+  geminiProCost,
+  gptOssCost,
+} from "./pricing.js";
 
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
@@ -166,12 +174,6 @@ export function getMaxOutputTokens(modelId: string, runtimeModel?: string): numb
   return 8192;
 }
 
-const geminiFlashCost = { input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0.1 };
-const geminiProCost = { input: 1.25, output: 5.0, cacheRead: 0.3125, cacheWrite: 1.25 };
-const claudeSonnetCost = { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 };
-const claudeOpusCost = { input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 };
-const gptOssCost = { input: 0.6, output: 2.4, cacheRead: 0.15, cacheWrite: 0.6 };
-
 const geminiInputLimits: ProviderModelConfig["inputLimits"] = {
   maxRequestBytes: 20971520,
   images: {
@@ -251,7 +253,7 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
     input: ["text", "image"],
     inputLimits: geminiInputLimits,
-    cost: geminiFlashCost,
+    cost: gemini38FlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
   },
@@ -262,7 +264,7 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
     input: ["text", "image"],
     inputLimits: geminiInputLimits,
-    cost: geminiFlashCost,
+    cost: gemini38FlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
   },
@@ -273,7 +275,7 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
     input: ["text", "image"],
     inputLimits: geminiInputLimits,
-    cost: geminiFlashCost,
+    cost: gemini38FlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
   },
@@ -317,7 +319,7 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
     input: ["text", "image"],
     inputLimits: geminiInputLimits,
-    cost: geminiFlashCost,
+    cost: gemini35FlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
   },

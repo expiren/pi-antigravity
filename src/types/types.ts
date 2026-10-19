@@ -7,6 +7,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import type { GeminiRole, GeminiToolCallingMode, ThinkingEffort, ToolChoice } from "./enums.js";
+import type { PricingResolver } from "../models/pricing.js";
 
 // OAuth & Auth Types
 export type AntigravityOAuthCredentials = OAuthCredentials & {
@@ -53,6 +54,8 @@ export interface CredentialSource {
 export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice"> & {
   toolChoice?: ToolChoice;
   credentialSource?: CredentialSource;
+  /** Display-only estimates, resolved again when usage arrives. */
+  pricingResolver?: PricingResolver;
 };
 
 export type GeminiTextPart = { text: string; thoughtSignature?: string };

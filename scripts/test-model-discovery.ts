@@ -7,6 +7,7 @@ import {
   buildAntigravityCatalog,
   buildAntigravityImageModels,
   clearModelEnumCache,
+  costForModelId,
   getAntigravityRequestModelId,
   getModelEnum,
   hydrateAntigravityCatalog,
@@ -195,6 +196,19 @@ try {
   const argon = persisted.catalog.models.find((model) => model.id === "gemini-4-argon");
   assert(argon?.name === "Gemini 4 Argon (Antigravity)", "discovers Argon without a static seed");
   assert(argon && "thinkingLevelMap" in argon, "Argon exposes thinking controls");
+  const argonCost = costForModelId("gemini-4-argon");
+  assert(
+    argonCost &&
+      argon.cost.input === argonCost.input &&
+      argon.cost.output === argonCost.output &&
+      argon.cost.cacheRead === argonCost.cacheRead,
+    "Argon uses its resolved pricing instead of the first Flash template",
+  );
+  const price = (id: string) => ANTIGRAVITY_MODELS.find((model) => model.id === id)?.cost;
+  assert(price("gemini-3.8-flash")?.input === 0.75, "Gemini 3.8 Flash price");
+  assert(price("gemini-3.5-flash")?.input === 1.5, "Gemini 3.5 Flash price");
+  assert(price("claude-opus-4-6")?.input === 5, "Claude Opus 4.6 price");
+  assert(price("claude-sonnet-4-6")?.output === 15, "Claude Sonnet 4.6 price");
   for (const level of ["low", "medium", "high"] as const) {
     const runtimeId = `gemini-4-argon-${level}`;
     assert(argon.thinkingLevelMap?.[level] === level, `Argon advertises ${level}`);

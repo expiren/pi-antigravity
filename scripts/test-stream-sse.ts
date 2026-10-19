@@ -4,7 +4,8 @@
  * including boundaries that split a single `data:` line.
  */
 import { createAssistantMessageEventStream, type Api, type Model } from "@earendil-works/pi-ai";
-import { streamResponse } from "../src/stream/stream.js";
+import { streamAntigravity, streamResponse } from "../src/stream/stream.js";
+import { createPricingResolver, type PricingResolver } from "../src/models/pricing.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 function sse(payload: unknown): string {
@@ -78,10 +79,16 @@ function splitEvery(text: string, size: number): string[] {
   return out;
 }
 
-async function run(chunks: string[], model?: Model<Api>) {
+async function run(chunks: string[], model?: Model<Api>, resolveCost?: PricingResolver) {
   const stream = createAssistantMessageEventStream();
   const output = makeOutput();
-  const hasContent = await streamResponse(responseFromChunks(chunks), stream, output, model);
+  const hasContent = await streamResponse(
+    responseFromChunks(chunks),
+    stream,
+    output,
+    model,
+    resolveCost,
+  );
   stream.end();
   const events: string[] = [];
   for await (const event of stream) events.push(event.type);
@@ -141,7 +148,7 @@ async function main() {
   assert(hasContent, "truncated body: expected content");
 
   const dummyModel = {
-    id: "gemini-3.7-flash",
+    id: "unknown-custom",
     cost: { input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0.1 },
   } as Model<Api>;
   const costRun = await run([BODY], dummyModel);
@@ -159,7 +166,50 @@ async function main() {
   assert(noCostRun.output.usage.cost.total === 0, "omitted cost defaults total to 0");
   assert(noCostRun.output.usage.cost.input === 0, "omitted cost defaults input to 0");
 
-  console.log(`stream SSE: ${sizes.length} chunk-boundary cases passed`);
+  // A selected model may outlive registry refreshes. Resolve again when usage arrives,
+  // without mutating the selection or asking the host to refresh its provider list.
+  const selected = {
+    ...dummyModel,
+    id: "gemini-3.7-flash",
+    name: "Gemini Flash",
+    provider: "antigravity",
+    api: "antigravity-api",
+  } as Model<Api>;
+  let liveCost = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+  const resolveCost = createPricingResolver({
+    find: () => ({ cost: liveCost }),
+    getModels: () => [],
+  });
+  const before = await run([BODY], selected, resolveCost);
+  assert(Math.abs(before.output.usage.cost.total - 0.000224) < 1e-9, "initial live price");
+  liveCost = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
+  const after = await run([BODY], selected, resolveCost);
+  assert(Math.abs(after.output.usage.cost.total - 0.000448) < 1e-9, "updated live price");
+  assert(selected.cost.input === 0.1, "selected model retains its old snapshot");
+
+  // Exercise the public streaming entry point too, including resolver propagation.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    // Simulate a registry update after the request has already started.
+    liveCost = { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 0 };
+    return responseFromChunks([BODY]);
+  }) as typeof fetch;
+  try {
+    const result = await streamAntigravity(
+      selected,
+      { messages: [{ role: "user", content: "test" }] },
+      {
+        apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
+        pricingResolver: resolveCost,
+      },
+    ).result();
+    assert(result.stopReason !== "error", result.errorMessage ?? "stream failed");
+    assert(Math.abs(result.usage.cost.total - 0.000896) < 1e-9, "latest in-flight price");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  console.log(`stream SSE: ${sizes.length} chunk-boundary cases and live repricing passed`);
 }
 
 void main();
