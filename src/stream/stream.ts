@@ -350,6 +350,8 @@ export function convertMessages(
           });
         } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
           if (!isSameModel) continue;
+          // Claude rejects replayed thinking without its original signature.
+          if (runtimeModel.startsWith("claude-") && !block.thinkingSignature) continue;
           parts.push({
             thought: true,
             text: sanitizeText(block.thinking),
@@ -931,7 +933,28 @@ export function buildRequest(
   if (options.maxTokens !== undefined) {
     generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
   } else {
-    generationConfig.maxOutputTokens = Math.min(maxAllowed, model.maxTokens || maxAllowed);
+    generationConfig.maxOutputTokens = Math.min(
+      maxAllowed,
+      model.maxTokens || maxAllowed,
+      thinking?.includeThoughts && runtimeModel.startsWith("claude-opus-4-6") ? 8192 : maxAllowed,
+    );
+  }
+  if (runtimeModel.startsWith("claude-")) {
+    generationConfig.maxOutputTokens = Math.min(
+      generationConfig.maxOutputTokens,
+      model.maxTokens || maxAllowed,
+    );
+    if (
+      !Number.isSafeInteger(generationConfig.maxOutputTokens) ||
+      generationConfig.maxOutputTokens < 1
+    ) {
+      throw new Error("Claude maxTokens must be a positive integer within the model output limit.");
+    }
+    if (thinking?.includeThoughts && generationConfig.maxOutputTokens <= thinking.thinkingBudget) {
+      throw new Error(
+        `Claude maxTokens=${generationConfig.maxOutputTokens} must exceed thinking budget ${thinking.thinkingBudget}. Next: raise options.maxTokens or model.maxTokens to at least ${thinking.thinkingBudget + 1} (runtime maximum ${maxAllowed}), or explicitly disable reasoning on a model that supports it.`,
+      );
+    }
   }
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
@@ -1000,6 +1023,9 @@ export function mapStopReason(reason: string | undefined): StopReason {
 export function friendlyAntigravityError(status: number | undefined, text: string): string {
   const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
   if (status === 400) {
+    if (/max_tokens.*thinking\.budget_tokens/i.test(msg)) {
+      return `Claude output/thinking token configuration was rejected (${msg}). Next: raise the output cap above the enabled thinking budget within the model limit, or explicitly disable reasoning on a model that supports it; changing accounts will not fix this request.`;
+    }
     if (/Requests ending with a model turn are not supported/i.test(msg)) {
       return "Antigravity rejected an invalid conversation message boundary. Next: update the extension or add a user message / start a new session, then retry.";
     }

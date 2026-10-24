@@ -107,7 +107,7 @@ function handleDoctorCommand(ctx: ExtensionCommandContext): void {
     `rotationCount=${d.healthSelection?.rotationCount ?? 0}`,
     `skipReasons=${JSON.stringify(d.healthSelection?.skipReasons ?? {})}`,
     `selectionBasis=${d.healthSelection?.basis ?? "unknown"}`,
-    `lastFailureClass=${d.healthSelection?.lastFailureClass ?? "none"}`,
+    `lastRecoveryFailureClass=${d.healthSelection?.lastFailureClass ?? "none"}`,
     ...(d.latencyMs !== undefined ? [`lastLatencyMs=${d.latencyMs}`] : []),
     `toolSchemaWarnings=${d.toolSchemaWarnings || "none"}`,
     `lastError=${
