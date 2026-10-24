@@ -60,6 +60,7 @@ import {
   type AntigravityGenerateRequest,
   type AntigravityStreamOptions,
   type ContentBlock,
+  type CredentialSource,
   type GeminiContent,
   type GeminiFunctionDeclaration,
   type GeminiFunctionResponsePart,
@@ -1516,12 +1517,23 @@ export function streamAntigravity(
   void runWithDiagnostics(async () => {
     const startTime = Date.now();
     const output = createOutput(model);
+    let credentialSource: CredentialSource | undefined;
     try {
+      if (opts.signal?.aborted) throw new Error("Request was aborted");
+      const effort = opts.reasoning ?? "off";
+      const isKnownModel = model.id in getCurrentAntigravityRouting();
+      const baseRuntimeModel =
+        antigravityEnv("RUNTIME_MODEL")?.trim() || getAntigravityRequestModelId(model.id, effort);
+      credentialSource =
+        opts.credentialSource?.forRequest?.(baseRuntimeModel) ?? opts.credentialSource;
       let creds: AntigravityApiKey;
-      if (opts.apiKey) {
+      if (credentialSource?.prepare) {
+        // Host-provided active auth must not bypass the model-aware account pool.
+        creds = await credentialSource.current();
+      } else if (opts.apiKey) {
         creds = parseApiKey(opts.apiKey);
-      } else if (opts.credentialSource) {
-        creds = await opts.credentialSource.current();
+      } else if (credentialSource) {
+        creds = await credentialSource.current();
       } else {
         creds = parseApiKey(undefined);
       }
@@ -1536,11 +1548,6 @@ export function streamAntigravity(
         credentialProjectId: creds.projectId,
       });
       setLastProjectId(projectId);
-
-      const effort = opts.reasoning ?? "off";
-      const isKnownModel = model.id in getCurrentAntigravityRouting();
-      const baseRuntimeModel =
-        antigravityEnv("RUNTIME_MODEL")?.trim() || getAntigravityRequestModelId(model.id, effort);
 
       let initialRuntimeModel = baseRuntimeModel;
       // Skip pre-flight model discovery for known static models to optimize TTFT latency.
@@ -1573,7 +1580,28 @@ export function streamAntigravity(
         try {
           for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
             runtimeModel = runtimeCandidates[candIdx]!;
-            setLastResolvedRuntimeModel(runtimeModel);
+            if (credentialSource?.prepare) {
+              const previousIdentity = credentialSource.identity?.();
+              const prepared = await credentialSource.prepare(runtimeModel, projectId);
+              if (prepared.token !== creds.token) {
+                if (previousIdentity !== credentialSource.identity?.()) {
+                  if (accountChanges >= maxAccountChanges)
+                    throw new Error(
+                      "Antigravity recovery exhausted: account-change budget reached.",
+                    );
+                  accountChanges++;
+                }
+                triedAccessTokens.add(prepared.token);
+                creds = prepared;
+                requestHeaders = antigravityHeaders(creds.token);
+                projectId = resolveProjectId({
+                  token: creds.token,
+                  credentialProjectId: creds.projectId,
+                });
+                setLastProjectId(projectId);
+              }
+            }
+            setLastResolvedRuntimeModel(runtimeModel, model.id);
             const body = JSON.stringify(
               buildRequest(model, context, projectId, opts, runtimeModel),
             );
@@ -1685,9 +1713,32 @@ export function streamAntigravity(
           if (received) break;
           throw new RecoverableStreamError("Antigravity API returned an empty response");
         } catch (error) {
+          let retryAccount = true;
+          if (
+            response &&
+            !response.ok &&
+            ([401, 403, 404, 429].includes(response.status) || response.status >= 500)
+          ) {
+            retryAccount =
+              (await credentialSource?.failed?.({
+                runtimeModel,
+                projectId,
+                status: response.status,
+                body: lastText,
+                headers: response.headers,
+              })) ?? true;
+          } else if (!opts.signal?.aborted && error instanceof RecoverableStreamError) {
+            retryAccount =
+              (await credentialSource?.failed?.({
+                runtimeModel,
+                projectId,
+                timeout: true,
+              })) ?? true;
+          }
           if (
             opts.signal?.aborted ||
             output.content.length > 0 ||
+            !retryAccount ||
             !(error instanceof RecoverableStreamError)
           )
             throw error;
@@ -1696,7 +1747,7 @@ export function streamAntigravity(
               `${safeError(error)} Recovery exhausted: ${reason} (${accountChanges}/${maxAccountChanges} account changes). Next: retry later or switch models.`,
             );
           if (accountChanges >= maxAccountChanges) throw exhausted("account-change budget reached");
-          const next = await opts.credentialSource?.rotate(triedAccessTokens);
+          const next = await credentialSource?.rotate(triedAccessTokens);
           if (opts.signal?.aborted) throw new Error("Request was aborted");
           if (!next || triedAccessTokens.has(next.token)) {
             throw exhausted("no eligible untried account");
@@ -1716,6 +1767,10 @@ export function streamAntigravity(
       }
 
       if (!received) throw new Error("Antigravity API returned an empty response");
+      if (opts.signal?.aborted) throw new Error("Request was aborted");
+      if (output.stopReason !== "error" && output.stopReason !== "aborted")
+        await credentialSource?.succeeded?.();
+      await credentialSource?.release?.();
       setLastLatencyMs(Date.now() - startTime);
       if (output.stopReason === "error" || output.stopReason === "aborted") {
         const errorDetail =
@@ -1744,7 +1799,15 @@ export function streamAntigravity(
     } catch (error) {
       setLastLatencyMs(Date.now() - startTime);
       output.stopReason = opts.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = safeError(error);
+      output.errorMessage = safeError(error).replace(
+        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,
+        "[redacted-email]",
+      );
+      try {
+        await credentialSource?.release?.();
+      } catch (releaseError) {
+        output.errorMessage += ` Health reservation cleanup failed: ${safeError(releaseError)}`;
+      }
       setLastError(output.errorMessage);
       // Ensure endpoint is recorded even if failure happened before setLastEndpoint.
       if (!getCurrentEndpoint() && endpointCandidates()[0]) {

@@ -7,13 +7,28 @@ export type DiagnosticsSnapshot = {
   error?: string;
   projectId?: string;
   resolvedRuntimeModel?: string;
+  requestedModel?: string;
   availableModels?: string;
   matchedModelDebug?: string;
   latencyMs?: number;
   maskedEmail?: string;
   tokenExpiry?: string;
   toolSchemaWarnings?: string;
+  healthSelection?: HealthSelection;
 };
+
+export type HealthSelection = {
+  selectedAccount: string;
+  runtimeModel: string;
+  rotationCount: number;
+  skipReasons: Record<string, number>;
+  basis: "unknown" | "recent_success";
+  lastFailureClass?: string;
+};
+
+export function setHealthSelection(selection: HealthSelection): void {
+  currentBag().healthSelection = { ...selection, skipReasons: { ...selection.skipReasons } };
+}
 
 const storage = new AsyncLocalStorage<DiagnosticsSnapshot>();
 
@@ -71,8 +86,12 @@ export function setLastError(error: string | undefined): void {
 export function setLastProjectId(projectId: string | undefined): void {
   currentBag().projectId = projectId;
 }
-export function setLastResolvedRuntimeModel(model: string | undefined): void {
+export function setLastResolvedRuntimeModel(
+  model: string | undefined,
+  requestedModel?: string,
+): void {
   currentBag().resolvedRuntimeModel = model;
+  currentBag().requestedModel = requestedModel;
 }
 export function setLastAvailableModels(models: string | undefined): void {
   currentBag().availableModels = models;

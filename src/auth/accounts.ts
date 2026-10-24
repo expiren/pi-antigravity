@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { defaultProjectId } from "../client/client.js";
@@ -40,7 +40,7 @@ export type AccountAccess = {
 };
 
 function agentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR || getAgentDir();
 }
 
 function accountsPath(): string {
@@ -104,8 +104,23 @@ function normalizeStore(value: Record<string, unknown> | undefined): AccountsFil
   };
 }
 
-export function loadAccountStore(): AccountsFile {
-  return normalizeStore(readJsonObject(accountsPath()));
+export function loadAccountStore(strict = false): AccountsFile {
+  const raw = readJsonObject(accountsPath());
+  if (
+    strict &&
+    existsSync(accountsPath()) &&
+    (!raw ||
+      raw.version !== 1 ||
+      !raw.accounts ||
+      typeof raw.accounts !== "object" ||
+      Array.isArray(raw.accounts) ||
+      Object.values(raw.accounts).some((account) => !isStoredAccount(account)))
+  ) {
+    throw new Error(
+      "Antigravity account store is unreadable; refusing credential selection or rewrite.",
+    );
+  }
+  return normalizeStore(raw);
 }
 
 function saveAccountStore(store: AccountsFile): void {
@@ -259,6 +274,18 @@ export function listAccounts(): AccountSummary[] {
 async function ensureFresh(account: StoredAccount): Promise<StoredAccount> {
   if (account.access && account.expires > Date.now() + REFRESH_SKEW_MS) return account;
   return accountFromCredentials(await refreshAntigravityToken(account), account);
+}
+
+/** Model-aware selection does not activate accounts or rewrite auth on health-only changes. */
+export async function getAccountApiKey(accountId: string): Promise<AntigravityApiKey> {
+  const existing = loadAccountStore(true).accounts[accountId];
+  if (!existing) throw new Error("Selected Antigravity account was removed; retry the request.");
+  const fresh = await ensureFresh(existing);
+  if (fresh !== existing) {
+    updateRememberedAccount(existing, fresh);
+    if (loadAccountStore(true).activeAccountId === accountId) writeActiveCredential(fresh);
+  }
+  return apiKeyFor(fresh);
 }
 
 export function apiKeyFor(account: StoredAccount): AntigravityApiKey {

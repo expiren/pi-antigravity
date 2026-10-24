@@ -1,16 +1,17 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { listAccounts } from "../auth/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "../diagnostics/index.js";
+import { formatHealthSummary, healthSummary } from "../health/report.js";
 import {
   applyAntigravityCatalog,
   discoverAntigravityModels,
   getCurrentAntigravityCatalog,
   PROVIDER_ID,
   resolvedCatalog,
+  getAntigravityRequestModelId,
 } from "../models/index.js";
 import { fetchAccountUsage, formatModelsList, resolveApiKeyFromContext } from "../usage/index.js";
 import { emitCommandOutput, runAccountsDashboard } from "../ui/index.js";
-import { maskEmail, redactSecrets } from "../utils/index.js";
+import { redactSecrets } from "../utils/index.js";
 
 const ROOT_HELP = "Usage: /antigravity [models | doctor]";
 
@@ -18,6 +19,7 @@ export type AntigravitySubcommand =
   | { action: "dashboard" }
   | { action: "models"; all: boolean }
   | { action: "doctor" }
+  | { action: "health"; model?: string }
   | { action: "invalid"; message: string };
 
 /** Pure argument parser for the unified `/antigravity` root command. */
@@ -27,6 +29,7 @@ export function parseAntigravitySubcommand(args: string): AntigravitySubcommand 
   const keyword = head.toLowerCase();
   if (keyword === "models") return { action: "models", all: /\ball\b/i.test(rest.join(" ")) };
   if (keyword === "doctor") return { action: "doctor" };
+  if (keyword === "health") return { action: "health", model: rest[0] };
   return { action: "invalid", message: ROOT_HELP };
 }
 
@@ -77,14 +80,19 @@ async function handleModelsCommand(
   }
 }
 
+function activeHealthModel(ctx: ExtensionCommandContext): string | undefined {
+  const d = getLastDiagnostics();
+  const matchingLastRequest = !ctx.model || ctx.model.id === d.requestedModel;
+  return (
+    (matchingLastRequest ? d.resolvedRuntimeModel : undefined) ??
+    (ctx.model ? getAntigravityRequestModelId(ctx.model.id, undefined) : undefined)
+  );
+}
+
 function handleDoctorCommand(ctx: ExtensionCommandContext): void {
   const d = getLastDiagnostics();
-  const accounts = listAccounts();
-  const active = accounts.find((account) => account.active);
-  const activeLabel = active
-    ? maskEmail(active.email) ||
-      (active.accountId.includes("@") ? maskEmail(active.accountId) : active.accountId)
-    : "none";
+  const model = activeHealthModel(ctx) ?? "unknown";
+  const summary = healthSummary(model);
   const lines = [
     `provider=${PROVIDER_ID}`,
     `lastResolvedRuntimeModel=${d.resolvedRuntimeModel || "none"}`,
@@ -93,14 +101,26 @@ function handleDoctorCommand(ctx: ExtensionCommandContext): void {
     `lastEndpoint=${d.endpoint || "none"}`,
     `lastStatus=${d.status ?? "none"}`,
     `lastProjectId=${d.projectId || "none"}`,
-    `linkedAccounts=${accounts.length || "none"}`,
-    `activeAccount=${activeLabel || "none"}`,
+    formatHealthSummary(summary),
+    `selectedAccount=${d.healthSelection?.selectedAccount ?? "none"}`,
+    `selectionRuntimeModel=${d.healthSelection?.runtimeModel ?? "none"}`,
+    `rotationCount=${d.healthSelection?.rotationCount ?? 0}`,
+    `skipReasons=${JSON.stringify(d.healthSelection?.skipReasons ?? {})}`,
+    `selectionBasis=${d.healthSelection?.basis ?? "unknown"}`,
+    `lastFailureClass=${d.healthSelection?.lastFailureClass ?? "none"}`,
     ...(d.latencyMs !== undefined ? [`lastLatencyMs=${d.latencyMs}`] : []),
     `toolSchemaWarnings=${d.toolSchemaWarnings || "none"}`,
-    `lastError=${d.error ? redactSecrets(d.error) : "none"}`,
+    `lastError=${
+      d.error
+        ? redactSecrets(d.error).replace(
+            /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,
+            "[redacted-email]",
+          )
+        : "none"
+    }`,
     "transport=native-streamSimple",
     "runtimeCli=not-used",
-    "commands=/antigravity /antigravity models /antigravity doctor",
+    "commands=/antigravity /antigravity models /antigravity doctor /antigravity health [runtime-model]",
   ];
   emitCommandOutput(ctx, `Antigravity doctor\n${lines.join("\n")}`);
 }
@@ -116,7 +136,36 @@ async function handleAntigravityCommand(args: string, ctx: ExtensionCommandConte
     return;
   }
   if (parsed.action === "doctor") {
-    handleDoctorCommand(ctx);
+    try {
+      handleDoctorCommand(ctx);
+    } catch (error) {
+      emitCommandOutput(
+        ctx,
+        `Antigravity health unavailable: ${redactSecrets(String(error))}`,
+        "warning",
+      );
+    }
+    return;
+  }
+  if (parsed.action === "health") {
+    const model = parsed.model ?? activeHealthModel(ctx);
+    if (!model) {
+      emitCommandOutput(
+        ctx,
+        "Choose a model or use /antigravity health <runtime-model>.",
+        "warning",
+      );
+      return;
+    }
+    try {
+      emitCommandOutput(ctx, formatHealthSummary(healthSummary(model)));
+    } catch (error) {
+      emitCommandOutput(
+        ctx,
+        `Antigravity health unavailable: ${redactSecrets(String(error))}`,
+        "warning",
+      );
+    }
     return;
   }
   await runAccountsDashboard(ctx);
@@ -129,11 +178,16 @@ const SUBCOMMANDS = [
     description: "Sync model catalog and list models with quota",
   },
   { value: "doctor", label: "doctor", description: "Show sanitized provider diagnostics" },
+  {
+    value: "health",
+    label: "health",
+    description: "Read persisted model quota health without provider calls",
+  },
 ];
 
 export function registerAntigravityCommands(pi: ExtensionAPI): void {
   pi.registerCommand("antigravity", {
-    description: "Antigravity control center (models | doctor)",
+    description: "Antigravity control center (models | doctor | health [runtime-model])",
     getArgumentCompletions: (prefix) => {
       const needle = prefix.trimStart().toLowerCase();
       return SUBCOMMANDS.filter((item) => item.value.startsWith(needle));
