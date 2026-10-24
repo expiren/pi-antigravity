@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { readSync } from "node:fs";
+import { readSync, writeSync } from "node:fs";
 import { healthScope, recordKey } from "../src/health/scope.js";
 import { HealthStore, HealthStoreError } from "../src/health/store.js";
 
@@ -16,14 +16,14 @@ try {
       cooldownUntil: 0,
     };
     if (mode === "hold") {
-      process.stdout.write("LOCKED\n");
+      writeSync(1, "LOCKED\n");
       const command = Buffer.alloc(1);
       if (readSync(0, command, 0, 1, null) !== 1) throw new Error("Missing release signal.");
       if (command[0] === 88) process.exit(17);
     }
   });
-  process.stdout.write("COMMITTED\n");
+  writeSync(1, "COMMITTED\n");
 } catch (error) {
   if (!(error instanceof HealthStoreError)) throw error;
-  process.stdout.write(`ERROR:${error.code}\n`);
+  writeSync(1, `ERROR:${error.code}\n`);
 }
