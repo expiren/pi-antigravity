@@ -1100,11 +1100,22 @@ const STREAM_HEADER_TIMEOUT_DEFAULT_MS = 180_000;
 /** Default mid-body stall deadline: abort when no SSE bytes arrive for this long. */
 const STREAM_STALL_TIMEOUT_DEFAULT_MS = 120_000;
 
+class RecoverableStreamError extends Error {}
+
 function envTimeoutMs(name: string, fallback: number): number {
   const raw = antigravityEnv(name);
   if (!raw || !/^\d+$/.test(raw)) return fallback;
   const value = Number(raw);
-  return Number.isSafeInteger(value) ? value : fallback;
+  return Number.isSafeInteger(value) && value <= 2_147_483_647 ? value : fallback;
+}
+
+/** Includes hidden reasoning latency, but never resets on SSE heartbeats. */
+export function streamFirstContentTimeoutMs(): number {
+  return envTimeoutMs("STREAM_FIRST_CONTENT_TIMEOUT_MS", 120_000);
+}
+
+export function streamMaxAccountChanges(): number {
+  return envTimeoutMs("STREAM_MAX_ACCOUNT_CHANGES", 3);
 }
 
 /**
@@ -1128,7 +1139,7 @@ export function streamStallTimeoutMs(): number {
 }
 
 function stallError(stallMs: number): Error {
-  return new Error(`stream stalled: no data for ${stallMs}ms`);
+  return new RecoverableStreamError(`stream stalled: no data for ${stallMs}ms`);
 }
 
 /**
@@ -1154,7 +1165,9 @@ function guardResponseBody(
     if (finished) return;
     finished = true;
     if (timer) clearTimeout(timer);
+    controller.signal.removeEventListener("abort", abortBody);
     cleanup();
+    reader.releaseLock();
   };
   const reset = () => {
     if (stallMs <= 0) return;
@@ -1177,6 +1190,7 @@ function guardResponseBody(
     async pull(streamController) {
       try {
         const chunk = await reader.read();
+        if (finished) return;
         if (chunk.done) {
           finish();
           streamController.close();
@@ -1188,13 +1202,16 @@ function guardResponseBody(
         reset();
         streamController.enqueue(chunk.value);
       } catch (error) {
+        if (finished) return;
         finish();
         streamController.error(error);
       }
     },
     async cancel(reason) {
+      const cancelled = reader.cancel(reason);
       finish();
-      await reader.cancel(reason);
+      controller.abort(reason);
+      await cancelled;
     },
   });
   return new Response(guarded, response);
@@ -1230,17 +1247,37 @@ export async function fetchWithHeaderDeadline(
   const timer =
     timeoutMs > 0
       ? setTimeout(
-          () => controller.abort(new Error(`no response headers within ${timeoutMs}ms`)),
+          () =>
+            controller.abort(
+              new RecoverableStreamError(`no response headers within ${timeoutMs}ms`),
+            ),
           timeoutMs,
         )
       : undefined;
   let responseBodyGuarded = false;
+  let rejectAbort: (reason: unknown) => void = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = () => rejectAbort(controller.signal.reason);
+  controller.signal.addEventListener("abort", onAbort, { once: true });
+  if (controller.signal.aborted) onAbort();
   try {
-    const response = await fetchFn(url, { ...init, signal: controller.signal });
+    const pending = (
+      controller.signal.aborted ? aborted : fetchFn(url, { ...init, signal: controller.signal })
+    ).then((response) => {
+      if (controller.signal.aborted) {
+        void response.body?.cancel(controller.signal.reason).catch(() => undefined);
+        throw controller.signal.reason;
+      }
+      return response;
+    });
+    const response = await Promise.race([pending, aborted]);
     responseBodyGuarded = Boolean(response.body);
     return guardResponseBody(response, controller, stallMs, cleanup);
   } finally {
     if (timer) clearTimeout(timer);
+    controller.signal.removeEventListener("abort", onAbort);
     if (!responseBodyGuarded) cleanup();
   }
 }
@@ -1252,8 +1289,10 @@ export async function streamResponse(
   stream: AssistantMessageEventStream,
   output: AssistantMessage,
   model?: Model<Api>,
+  firstContentMs: number = streamFirstContentTimeoutMs(),
 ): Promise<boolean> {
-  if (!response.body) throw new Error("No response body");
+  if (!response.body)
+    throw new RecoverableStreamError("Antigravity API returned an empty response");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1265,6 +1304,25 @@ export async function streamResponse(
   let hasContent = false;
   const blocks = output.content;
   const blockIndex = () => blocks.length - 1;
+  let rejectFirstContent: (reason: Error) => void = () => {};
+  const firstContentDeadline = new Promise<never>((_resolve, reject) => {
+    rejectFirstContent = reject;
+  });
+  const firstContentTimer =
+    firstContentMs > 0
+      ? setTimeout(() => {
+          const error = new RecoverableStreamError(
+            `no meaningful model content within ${firstContentMs}ms`,
+          );
+          rejectFirstContent(error);
+          void reader.cancel(error).catch(() => undefined);
+        }, firstContentMs)
+      : undefined;
+  const meaningfulContent = () => {
+    meaningful = true;
+    if (firstContentTimer) clearTimeout(firstContentTimer);
+  };
+  let meaningful = false;
 
   const ensureStarted = () => {
     if (!started) {
@@ -1293,134 +1351,158 @@ export async function streamResponse(
     currentBlock = null;
   };
 
-  while (true) {
-    const result = await reader.read();
-    if (result.done) break;
-    if (!(result.value instanceof Uint8Array)) continue;
-    buffer += decoder.decode(result.value, { stream: true });
+  try {
+    while (true) {
+      const result = await (meaningful
+        ? reader.read()
+        : Promise.race([reader.read(), firstContentDeadline]));
+      if (result.done) break;
+      if (!(result.value instanceof Uint8Array)) continue;
+      buffer += decoder.decode(result.value, { stream: true });
 
-    let newlineIdx: number;
-    while ((newlineIdx = buffer.indexOf("\n", scanStart)) !== -1) {
-      const line = buffer.slice(scanStart, newlineIdx);
-      scanStart = newlineIdx + 1;
-      if (!line.startsWith("data:")) continue;
-      const json = line.slice(5).trim();
-      if (!json || json === "[DONE]") continue;
+      let newlineIdx: number;
+      while ((newlineIdx = buffer.indexOf("\n", scanStart)) !== -1) {
+        const line = buffer.slice(scanStart, newlineIdx);
+        scanStart = newlineIdx + 1;
+        if (!line.startsWith("data:")) continue;
+        const json = line.slice(5).trim();
+        if (!json || json === "[DONE]") continue;
 
-      let chunk: StreamChunk;
-      try {
-        chunk = JSON.parse(json) as StreamChunk;
-      } catch {
-        continue;
-      }
+        let chunk: StreamChunk;
+        try {
+          chunk = JSON.parse(json) as StreamChunk;
+        } catch {
+          continue;
+        }
 
-      if (chunk.error) {
-        throw new Error(chunk.error.message || JSON.stringify(chunk.error));
-      }
+        if (chunk.error) {
+          throw new Error(chunk.error.message || JSON.stringify(chunk.error));
+        }
 
-      const responseData = chunk.response || chunk;
-      const candidate = responseData.candidates?.[0];
+        const responseData = chunk.response || chunk;
+        const candidate = responseData.candidates?.[0];
 
-      for (const part of candidate?.content?.parts || []) {
-        if (part.text !== undefined) {
-          hasContent = true;
-          const isThinking = part.thought === true;
-          const type = isThinking ? "thinking" : "text";
-          if (!currentBlock || currentBlock.type !== type) {
+        for (const part of candidate?.content?.parts || []) {
+          if (part.text !== undefined && part.text.length > 0) {
+            meaningfulContent();
+            hasContent = true;
+            const isThinking = part.thought === true;
+            const type = isThinking ? "thinking" : "text";
+            if (!currentBlock || currentBlock.type !== type) {
+              finishCurrent();
+              currentBlock = isThinking
+                ? {
+                    type: "thinking",
+                    thinking: "",
+                    thinkingSignature: undefined,
+                  }
+                : { type: "text", text: "" };
+              blocks.push(currentBlock);
+              ensureStarted();
+              stream.push({
+                type: isThinking ? "thinking_start" : "text_start",
+                contentIndex: blockIndex(),
+                partial: output,
+              });
+            }
+            if (isThinking && currentBlock.type === "thinking") {
+              currentBlock.thinking += part.text;
+              if (part.thoughtSignature) currentBlock.thinkingSignature = part.thoughtSignature;
+              stream.push({
+                type: "thinking_delta",
+                contentIndex: blockIndex(),
+                delta: part.text,
+                partial: output,
+              });
+            } else if (!isThinking && currentBlock.type === "text") {
+              currentBlock.text += part.text;
+              if (part.thoughtSignature) currentBlock.textSignature = part.thoughtSignature;
+              stream.push({
+                type: "text_delta",
+                contentIndex: blockIndex(),
+                delta: part.text,
+                partial: output,
+              });
+            }
+          }
+
+          if (part.functionCall) {
+            meaningfulContent();
+            hasContent = true;
             finishCurrent();
-            currentBlock = isThinking
-              ? { type: "thinking", thinking: "", thinkingSignature: undefined }
-              : { type: "text", text: "" };
-            blocks.push(currentBlock);
+            const rawId = part.functionCall.id || "";
+            const toolCall: ToolCall = {
+              type: "toolCall",
+              id: sanitizeToolCallId(rawId, part.functionCall.name),
+              name: part.functionCall.name || "",
+              arguments: asToolCallArguments(part.functionCall.args),
+              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+            };
+            blocks.push(toolCall);
             ensureStarted();
             stream.push({
-              type: isThinking ? "thinking_start" : "text_start",
+              type: "toolcall_start",
               contentIndex: blockIndex(),
               partial: output,
             });
-          }
-          if (isThinking && currentBlock.type === "thinking") {
-            currentBlock.thinking += part.text;
-            if (part.thoughtSignature) currentBlock.thinkingSignature = part.thoughtSignature;
             stream.push({
-              type: "thinking_delta",
+              type: "toolcall_delta",
               contentIndex: blockIndex(),
-              delta: part.text,
+              delta: JSON.stringify(toolCall.arguments),
               partial: output,
             });
-          } else if (!isThinking && currentBlock.type === "text") {
-            currentBlock.text += part.text;
-            if (part.thoughtSignature) currentBlock.textSignature = part.thoughtSignature;
             stream.push({
-              type: "text_delta",
+              type: "toolcall_end",
               contentIndex: blockIndex(),
-              delta: part.text,
+              toolCall,
               partial: output,
             });
           }
         }
 
-        if (part.functionCall) {
-          hasContent = true;
-          finishCurrent();
-          const rawId = part.functionCall.id || "";
-          const toolCall: ToolCall = {
-            type: "toolCall",
-            id: sanitizeToolCallId(rawId, part.functionCall.name),
-            name: part.functionCall.name || "",
-            arguments: asToolCallArguments(part.functionCall.args),
-            ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
-          };
-          blocks.push(toolCall);
-          ensureStarted();
-          stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-          stream.push({
-            type: "toolcall_delta",
-            contentIndex: blockIndex(),
-            delta: JSON.stringify(toolCall.arguments),
-            partial: output,
-          });
-          stream.push({
-            type: "toolcall_end",
-            contentIndex: blockIndex(),
-            toolCall,
-            partial: output,
-          });
+        if (candidate?.finishReason) {
+          output.rawStopReason = candidate.finishReason;
+          output.stopReason = blocks.some((b) => b.type === "toolCall")
+            ? StopReason.ToolUse
+            : mapStopReason(candidate.finishReason);
+        }
+
+        if (responseData.usageMetadata) {
+          const prompt = responseData.usageMetadata.promptTokenCount || 0;
+          const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
+          const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
+          output.usage.input = prompt - cacheRead;
+          output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
+          output.usage.reasoning = thoughts;
+          output.usage.cacheRead = cacheRead;
+          output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
+          if (model?.cost) {
+            calculateCost(model, output.usage);
+          } else {
+            output.usage.cost = {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            };
+          }
         }
       }
 
-      if (candidate?.finishReason) {
-        output.rawStopReason = candidate.finishReason;
-        output.stopReason = blocks.some((b) => b.type === "toolCall")
-          ? StopReason.ToolUse
-          : mapStopReason(candidate.finishReason);
-      }
-
-      if (responseData.usageMetadata) {
-        const prompt = responseData.usageMetadata.promptTokenCount || 0;
-        const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
-        const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
-        output.usage.input = prompt - cacheRead;
-        output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
-        output.usage.reasoning = thoughts;
-        output.usage.cacheRead = cacheRead;
-        output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
-        if (model?.cost) {
-          calculateCost(model, output.usage);
-        } else {
-          output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-        }
+      if (scanStart > 0) {
+        buffer = buffer.slice(scanStart);
+        scanStart = 0;
       }
     }
 
-    if (scanStart > 0) {
-      buffer = buffer.slice(scanStart);
-      scanStart = 0;
-    }
+    finishCurrent();
+    return hasContent;
+  } finally {
+    if (firstContentTimer) clearTimeout(firstContentTimer);
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-
-  finishCurrent();
-  return hasContent;
 }
 
 export function streamAntigravity(
@@ -1482,133 +1564,155 @@ export function streamAntigravity(
       let lastText = "";
       let received = false;
       let runtimeModel = initialRuntimeModel;
+      let accountChanges = 0;
+      const maxAccountChanges = streamMaxAccountChanges();
 
-      for (let emptyAttempt = 0; emptyAttempt <= 2; emptyAttempt++) {
+      while (true) {
         if (opts.signal?.aborted) throw new Error("Request was aborted");
-        if (emptyAttempt > 0) {
-          const delay = 500 * 2 ** (emptyAttempt - 1);
-          await new Promise((res) => setTimeout(res, delay));
-        }
-
-        for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
-          runtimeModel = runtimeCandidates[candIdx]!;
-          setLastResolvedRuntimeModel(runtimeModel);
-          const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
-
-          for (const endpoint of endpointCandidates()) {
-            setLastEndpoint(endpoint);
-            response = await fetchWithHeaderDeadline(
-              `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
-              {
-                method: "POST",
-                headers: requestHeaders,
-                body,
-              },
-              opts.signal,
-              streamHeaderTimeoutMs(),
-              streamStallTimeoutMs(),
+        response = undefined;
+        try {
+          for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
+            runtimeModel = runtimeCandidates[candIdx]!;
+            setLastResolvedRuntimeModel(runtimeModel);
+            const body = JSON.stringify(
+              buildRequest(model, context, projectId, opts, runtimeModel),
             );
-            setLastStatus(response.status);
-            if (response.ok) break;
-            lastText = await response.text();
-            if (response.status === 429 && isHardQuotaWall(lastText)) {
-              break;
-            }
-            if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
-          }
 
-          if (response?.ok) break;
-          if (response?.status === 404) {
-            if (candIdx + 1 < runtimeCandidates.length) {
-              continue;
-            }
-            if (isKnownModel && candIdx === runtimeCandidates.length - 1) {
-              const dynamic = await fetchAvailableRuntimeModel(
-                creds.token,
-                projectId,
-                baseRuntimeModel,
+            for (const endpoint of endpointCandidates()) {
+              setLastEndpoint(endpoint);
+              response = await fetchWithHeaderDeadline(
+                `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
+                {
+                  method: "POST",
+                  headers: requestHeaders,
+                  body,
+                },
+                opts.signal,
+                streamHeaderTimeoutMs(),
+                streamStallTimeoutMs(),
               );
-              if (
-                dynamic?.id &&
-                !runtimeCandidates.includes(dynamic.id) &&
-                /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
-              ) {
-                runtimeCandidates.push(dynamic.id);
+              setLastStatus(response.status);
+              if (response.ok) break;
+              lastText = await response.text();
+              if (response.status === 429) {
+                break;
+              }
+              if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
+            }
+
+            if (response?.ok) break;
+            if (response?.status === 404) {
+              if (candIdx + 1 < runtimeCandidates.length) {
                 continue;
               }
-            }
-          }
-          break;
-        }
-
-        if (!response || !response.ok) {
-          if (antigravityEnv("DEBUG_DUMP") === "1") {
-            try {
-              const body = JSON.stringify(
-                buildRequest(model, context, projectId, opts, runtimeModel),
-              );
-              let parsedBody: unknown = body;
-              try {
-                parsedBody = JSON.parse(body) as unknown;
-              } catch {
-                parsedBody = body;
+              if (isKnownModel && candIdx === runtimeCandidates.length - 1) {
+                const dynamic = await fetchAvailableRuntimeModel(
+                  creds.token,
+                  projectId,
+                  baseRuntimeModel,
+                );
+                if (
+                  dynamic?.id &&
+                  !runtimeCandidates.includes(dynamic.id) &&
+                  /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
+                ) {
+                  runtimeCandidates.push(dynamic.id);
+                  continue;
+                }
               }
-              await (
-                await import("node:fs/promises")
-              ).writeFile(
-                "/tmp/antigravity-last-request.json",
-                JSON.stringify(
-                  {
-                    status: response?.status,
-                    runtimeModel,
-                    lastText: lastText.slice(0, 4000),
-                    body: parsedBody,
-                  },
-                  null,
-                  2,
-                ),
-              );
-            } catch {
-              // ignore dump failures
             }
+            break;
           }
-          const friendly = friendlyAntigravityError(response?.status, lastText);
-          if (response?.status === 429 && /Quota reached\./i.test(friendly)) {
-            const next = await opts.credentialSource?.rotate(triedAccessTokens);
-            if (next) {
-              triedAccessTokens.add(next.token);
-              creds = next;
-              requestHeaders = antigravityHeaders(creds.token);
-              const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
-              projectId = resolveProjectId({
-                token: creds.token,
-                warmedProject: switchedProject,
-                credentialProjectId: creds.projectId,
-              });
-              setLastProjectId(projectId);
-              emptyAttempt = -1;
-              continue;
+
+          if (!response || !response.ok) {
+            if (antigravityEnv("DEBUG_DUMP") === "1") {
+              try {
+                const body = JSON.stringify(
+                  buildRequest(model, context, projectId, opts, runtimeModel),
+                );
+                let parsedBody: unknown = body;
+                try {
+                  parsedBody = JSON.parse(body) as unknown;
+                } catch {
+                  parsedBody = body;
+                }
+                await (
+                  await import("node:fs/promises")
+                ).writeFile(
+                  "/tmp/antigravity-last-request.json",
+                  JSON.stringify(
+                    {
+                      status: response?.status,
+                      runtimeModel,
+                      lastText: lastText.slice(0, 4000),
+                      body: parsedBody,
+                    },
+                    null,
+                    2,
+                  ),
+                );
+              } catch {
+                // ignore dump failures
+              }
             }
-            throw new Error(friendly);
+            const friendly = friendlyAntigravityError(response?.status, lastText);
+            if (response?.status === 429) {
+              throw new RecoverableStreamError(friendly);
+            }
+            throw new Error(
+              `Antigravity API error (${response?.status ?? "no response"}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
+            );
           }
-          throw new Error(
-            `Antigravity API error (${response?.status ?? "no response"}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
-          );
+
+          output.content = [];
+          output.usage = {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          };
+          output.stopReason = "stop" as AssistantMessage["stopReason"];
+
+          received = await streamResponse(response, stream, output, model);
+          if (received) break;
+          throw new RecoverableStreamError("Antigravity API returned an empty response");
+        } catch (error) {
+          if (
+            opts.signal?.aborted ||
+            output.content.length > 0 ||
+            !(error instanceof RecoverableStreamError)
+          )
+            throw error;
+          const exhausted = (reason: string) =>
+            new Error(
+              `${safeError(error)} Recovery exhausted: ${reason} (${accountChanges}/${maxAccountChanges} account changes). Next: retry later or switch models.`,
+            );
+          if (accountChanges >= maxAccountChanges) throw exhausted("account-change budget reached");
+          const next = await opts.credentialSource?.rotate(triedAccessTokens);
+          if (opts.signal?.aborted) throw new Error("Request was aborted");
+          if (!next || triedAccessTokens.has(next.token)) {
+            throw exhausted("no eligible untried account");
+          }
+          accountChanges++;
+          triedAccessTokens.add(next.token);
+          creds = next;
+          requestHeaders = antigravityHeaders(creds.token);
+          const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
+          projectId = resolveProjectId({
+            token: creds.token,
+            warmedProject: switchedProject,
+            credentialProjectId: creds.projectId,
+          });
+          setLastProjectId(projectId);
         }
-
-        output.content = [];
-        output.usage = {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        };
-        output.stopReason = "stop";
-
-        received = await streamResponse(response, stream, output, model);
-        if (received) break;
       }
 
       if (!received) throw new Error("Antigravity API returned an empty response");
@@ -1622,11 +1726,19 @@ export function streamAntigravity(
               : "An unknown error occurred";
         output.errorMessage = output.errorMessage || errorDetail;
         setLastError(output.errorMessage);
-        stream.push({ type: "error", reason: output.stopReason, error: output });
+        stream.push({
+          type: "error",
+          reason: output.stopReason,
+          error: output,
+        });
       } else if (output.stopReason === "pending") {
         throw new Error("Antigravity API returned no stop reason");
       } else {
-        stream.push({ type: "done", reason: output.stopReason, message: output });
+        stream.push({
+          type: "done",
+          reason: output.stopReason,
+          message: output,
+        });
       }
       stream.end();
     } catch (error) {

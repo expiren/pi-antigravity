@@ -46,7 +46,7 @@ export type AntigravityApi = typeof ANTIGRAVITY_API;
 
 export interface CredentialSource {
   current(): Promise<AntigravityApiKey>;
-  /** Call only on a hard quota wall. Returns undefined when exhausted. */
+  /** Select an eligible untried account for pre-output recovery; undefined when exhausted. */
   rotate(excluded: ReadonlySet<string>): Promise<AntigravityApiKey | undefined>;
 }
 
