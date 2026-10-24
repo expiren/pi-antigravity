@@ -245,4 +245,28 @@ const flat = JSON.stringify(historyContents);
 assert.ok(flat.includes('"functionCall"') || flat.includes("Observation"), "tool history replayed");
 assert.ok(!flat.includes("toolsAdded"), "system payloads not leaked into contents");
 
+const claudeModel = { ...testModel, id: "claude-sonnet-4-6" };
+const claudeHistory = {
+  messages: [
+    { role: "user", content: "first", timestamp: 0 },
+    {
+      role: "assistant",
+      provider: "antigravity",
+      model: claudeModel.id,
+      stopReason: "stop",
+      timestamp: 1,
+      content: [
+        { type: "thinking", thinking: "unsigned internal thought" },
+        { type: "thinking", thinking: "signed internal thought", thinkingSignature: "abcdabcd" },
+        { type: "text", text: "The answer is 42." },
+      ],
+    },
+    { role: "user", content: "second", timestamp: 2 },
+  ],
+} as unknown as Context;
+const claudeParts = convertMessages(claudeModel, claudeHistory, claudeModel.id)[1].parts;
+assert.ok(!JSON.stringify(claudeParts).includes("unsigned internal thought"));
+assert.ok(JSON.stringify(claudeParts).includes("signed internal thought"));
+assert.ok(JSON.stringify(claudeParts).includes("The answer is 42."));
+
 console.log("scripts/test-transcript-context.ts: all TranscriptContext tests passed");

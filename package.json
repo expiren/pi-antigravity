@@ -41,9 +41,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "security-check": "bun scripts/security-check.ts",
-    "test": "bun scripts/test-model-routing.ts && bun scripts/test-model-discovery.ts && bun scripts/test-usage-formatter.ts && bun scripts/test-command-dispatch.ts && bun scripts/test-stream-sse.ts && bun scripts/test-stream-header-deadline.ts && bun scripts/test-http-proxy.ts && bun scripts/test-image-gen.ts && bun scripts/test-search.ts && bun scripts/test-accounts.ts && bun scripts/test-transcript-context.ts && bun scripts/test-file-attachments.ts && bun scripts/test-analyze-file.ts && bun scripts/test-credential-source.ts && bun scripts/test-retry-policy.ts && bun run test:recovery && bun run test:health && bun scripts/check-v3-load.mjs",
+    "test": "bun scripts/test-model-routing.ts && bun scripts/test-model-discovery.ts && bun scripts/test-usage-formatter.ts && bun scripts/test-command-dispatch.ts && bun scripts/test-stream-sse.ts && bun scripts/test-stream-header-deadline.ts && bun scripts/test-http-proxy.ts && bun scripts/test-image-gen.ts && bun scripts/test-search.ts && bun scripts/test-accounts.ts && bun scripts/test-file-attachments.ts && bun scripts/test-analyze-file.ts && bun scripts/test-credential-source.ts && bun scripts/test-retry-policy.ts && bun run test:recovery && bun run test:health && bun run test:claude && bun scripts/check-v3-load.mjs",
     "test:recovery": "bun scripts/test-stream-recovery.ts",
     "test:health": "bun --preload ./scripts/v3-offline.ts scripts/test-health-store.ts && bun --preload ./scripts/v3-offline.ts scripts/test-account-health.ts && bun --preload ./scripts/v3-offline.ts scripts/test-health-stream.ts",
+    "test:claude": "bun --preload ./scripts/v3-offline.ts scripts/test-claude-thinking.ts && bun --preload ./scripts/v3-offline.ts scripts/test-transcript-context.ts",
     "smoke:tools": "bun scripts/smoke-tool-schema.ts",
     "smoke:models": "bun scripts/smoke-all-models.mjs",
     "check": "bun run typecheck && bun run lint && bun run format:check && bun run security-check && bun run test"
