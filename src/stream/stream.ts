@@ -1733,7 +1733,8 @@ export function streamAntigravity(
               total: 0,
             },
           };
-          output.stopReason = "stop" as AssistantMessage["stopReason"];
+          // Avoid narrowing: streamResponse updates this field while parsing.
+          Object.assign(output, { stopReason: "stop" });
 
           received = await streamResponse(response, stream, output, model);
           if (received) break;
@@ -1774,7 +1775,7 @@ export function streamAntigravity(
             );
           if (accountChanges >= maxAccountChanges) throw exhausted("account-change budget reached");
           const next = await credentialSource?.rotate(triedAccessTokens);
-          if (opts.signal?.aborted) throw new Error("Request was aborted");
+          if (opts.signal?.aborted) throw new Error("Request was aborted", { cause: error });
           if (!next || triedAccessTokens.has(next.token)) {
             throw exhausted("no eligible untried account");
           }

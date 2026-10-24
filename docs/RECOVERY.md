@@ -5,12 +5,12 @@ first-content deadline starts after response headers and is disarmed only by
 nonempty text, reasoning, or a function call; SSE heartbeats, metadata, and
 empty text do not count as generated content.
 
-| Environment variable | Default | Scope |
-| --- | ---: | --- |
-| `ANTIGRAVITY_STREAM_HEADER_TIMEOUT_MS` | 180000 | Waiting for response headers |
-| `ANTIGRAVITY_STREAM_FIRST_CONTENT_TIMEOUT_MS` | 120000 | Waiting for the first generated content |
-| `ANTIGRAVITY_STREAM_STALL_TIMEOUT_MS` | 120000 | Waiting for the next SSE byte |
-| `ANTIGRAVITY_STREAM_MAX_ACCOUNT_CHANGES` | 3 | Shared request-wide account-change budget |
+| Environment variable                          | Default | Scope                                     |
+| --------------------------------------------- | ------: | ----------------------------------------- |
+| `ANTIGRAVITY_STREAM_HEADER_TIMEOUT_MS`        |  180000 | Waiting for response headers              |
+| `ANTIGRAVITY_STREAM_FIRST_CONTENT_TIMEOUT_MS` |  120000 | Waiting for the first generated content   |
+| `ANTIGRAVITY_STREAM_STALL_TIMEOUT_MS`         |  120000 | Waiting for the next SSE byte             |
+| `ANTIGRAVITY_STREAM_MAX_ACCOUNT_CHANGES`      |       3 | Shared request-wide account-change budget |
 
 Timeout values are integer milliseconds; zero disables the relevant deadline.
 The account-change budget also covers quota and transient 429 responses. Recovery

@@ -101,3 +101,10 @@ Windows ACL operations use synchronous PowerShell subprocesses; Unix mode enforc
 still needs validation on Unix. A crashed acquisition can leave an ambiguous
 `.lock-recovery` gate: stop every writer to that store and inspect the orphan
 before removing it. No startup quota preflight or account-store migration is performed.
+
+On Windows, the repository-wide `bun run test` stops at the unchanged
+`scripts/test-accounts.ts` POSIX-mode assertion: `statSync` reports `0o666`
+for a private file created with `0o600`. Run the targeted suites above
+separately; the health-store tests check Windows ACLs directly. With
+`core.autocrlf=true`, `bun run format:check` also flags untouched upstream
+files, including `.prettierrc.json`, because the checkout uses CRLF endings.
