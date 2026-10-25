@@ -92,7 +92,7 @@ invisible until a user reports a symptom.
 ### 4. Related: two sources of truth for the active account
 
 ```
-antigravity-accounts.json  <- source of truth (all accounts)
+pi-antigravity.json  <- source of truth (all accounts)
         <->  syncCurrentAuth()   (src/auth/accounts.ts:210)
 auth.json                  <- projection Pi reads
 ```
@@ -117,7 +117,7 @@ Implement, in this order. Each stage is independently reviewable and behavior-pr
 3. **[P2-⑤] Slim the composition root.** Move the TUI component and command handlers
    out of `src/index.ts` so it only describes wiring.
 4. **[P1-③] Collect the 11 singletons into one injected state container.**
-5. **[P1-④] Make `auth.json` a one-way projection of `antigravity-accounts.json`.**
+5. **[P1-④] Make `auth.json` a one-way projection of `pi-antigravity.json`.**
 
 ## Non-goals / constraints
 
@@ -225,7 +225,7 @@ src/runtime/state.ts
 
 One instance, created in `src/index.ts`, passed down. Side benefit: `/antigravity.doctor`
 can report a consistency view instead of only the last snapshot — specifically whether
-the active account in `antigravity-accounts.json` matches the projected `auth.json`
+the active account in `pi-antigravity.json` matches the projected `auth.json`
 entry, which is exactly the drift that problem 4 hides today.
 
 ## Acceptance criteria
@@ -253,7 +253,7 @@ entry, which is exactly the drift that problem 4 hides today.
 - **Required:** no new runtime dependency. `undici` stays the only entry in
   `dependencies`; the `peerDependencies` ranges on `@earendil-works/pi-*` are unchanged.
 - **Conditional (P1-④ only):** after making `auth.json` a one-way projection, a startup
-  where `antigravity-accounts.json` names a different active account than `auth.json`
+  where `pi-antigravity.json` names a different active account than `auth.json`
   converges to the accounts file, and this is observable in `/antigravity.doctor`.
   Migration must not discard an account that exists only in `auth.json`.
 

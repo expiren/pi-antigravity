@@ -469,21 +469,119 @@ export function mergeAvailableModelsResults(
   };
 }
 
+export type AvailableModelsResult = ReturnType<typeof mergeAvailableModelsResults>;
+
+type CatalogLookup = {
+  controller: AbortController;
+  listeners: Set<(result: AvailableModelsResult) => void>;
+  latest?: AvailableModelsResult;
+  promise: Promise<AvailableModelsResult>;
+  users: number;
+  settled: boolean;
+};
+
+const inFlightCatalogs = new Map<string, CatalogLookup>();
+
 /**
- * Merge fetchAvailableModels across endpoint candidates so daily/sandbox-only
- * models appear alongside production catalog entries.
+ * Share concurrent catalog reads (including Pi registry refreshes). Publish each
+ * successful endpoint immediately, but still merge all endpoints in priority
+ * order so slow sandbox-only models are not lost. Cancellation belongs to each
+ * subscriber; only the last subscriber leaving cancels the shared probes.
  */
-export async function fetchAvailableModelsCatalog(
+export function fetchAvailableModelsCatalog(
   token: string,
   projectId: string,
   signal?: AbortSignal,
-): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
-  const results = await Promise.all(
-    endpointCandidates().map((endpoint) =>
-      fetchAvailableModelsFromEndpoint(endpoint, token, projectId, signal),
-    ),
-  );
-  return mergeAvailableModelsResults(results);
+  onUpdate?: (result: AvailableModelsResult) => void,
+): Promise<AvailableModelsResult> {
+  if (signal?.aborted) {
+    return Promise.reject(
+      signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"),
+    );
+  }
+  const endpoints = endpointCandidates();
+  const key = JSON.stringify([token, projectId, endpoints]);
+  let lookup = inFlightCatalogs.get(key);
+  if (!lookup) {
+    const controller = new AbortController();
+    const results: Array<Awaited<ReturnType<typeof fetchAvailableModelsFromEndpoint>>> = [];
+    const entry: CatalogLookup = {
+      controller,
+      listeners: new Set(),
+      users: 0,
+      settled: false,
+      promise: Promise.all(
+        endpoints.map(async (endpoint, index) => {
+          const result = await fetchAvailableModelsFromEndpoint(
+            endpoint,
+            token,
+            projectId,
+            controller.signal,
+          );
+          if (!result) return;
+          results[index] = result;
+          entry.latest = mergeAvailableModelsResults(results);
+          for (const listener of [...entry.listeners]) listener(entry.latest);
+        }),
+      )
+        .then(() => mergeAvailableModelsResults(results))
+        .finally(() => {
+          entry.settled = true;
+          if (inFlightCatalogs.get(key) === entry) inFlightCatalogs.delete(key);
+        }),
+    };
+    lookup = entry;
+    inFlightCatalogs.set(key, entry);
+  }
+  const entry = lookup;
+  entry.users++;
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const cleanup = () => {
+      finished = true;
+      entry.listeners.delete(update);
+      signal?.removeEventListener("abort", abort);
+      entry.users--;
+      if (entry.users === 0 && !entry.settled) {
+        if (inFlightCatalogs.get(key) === entry) inFlightCatalogs.delete(key);
+        entry.controller.abort();
+      }
+    };
+    const update = (result: AvailableModelsResult) => {
+      if (finished) return;
+      try {
+        onUpdate?.(result);
+      } catch (error) {
+        cleanup();
+        reject(error instanceof Error ? error : new Error(safeError(error)));
+      }
+    };
+    const abort = () => {
+      if (finished) return;
+      cleanup();
+      reject(
+        signal?.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"),
+      );
+    };
+    entry.listeners.add(update);
+    signal?.addEventListener("abort", abort, { once: true });
+    entry.promise.then(
+      (result) => {
+        if (finished) return;
+        cleanup();
+        setLastEndpoint(result.endpoint);
+        setLastStatus(result.status);
+        resolve(result);
+      },
+      (error: unknown) => {
+        if (finished) return;
+        cleanup();
+        reject(error instanceof Error ? error : new Error(safeError(error)));
+      },
+    );
+    if (signal?.aborted) abort();
+    else if (entry.latest) update(entry.latest);
+  });
 }
 
 async function loadCodeAssistUncached(token: string): Promise<string | undefined> {

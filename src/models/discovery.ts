@@ -8,6 +8,7 @@ import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { getApiKey } from "../auth/index.js";
 import { DEFAULT_ENDPOINT, fetchAvailableModelsCatalog, parseApiKey } from "../client/index.js";
 import { ANTIGRAVITY_API } from "../types/types.js";
+import { costForModelId, type PricingResolver } from "./pricing.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
 import { buildAntigravityCatalog, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
 import {
@@ -83,13 +84,14 @@ export async function discoverAntigravityModels(
 
 export async function refreshAntigravityModels(
   context: RefreshModelsContext,
+  resolveCost: PricingResolver = costForModelId,
 ): Promise<ProviderModelConfig[]> {
   const checkedAt = hydrateAntigravityCatalog(context.stored);
   const current = getCurrentAntigravityCatalog();
-  if (!context.allowNetwork) return listProviderModels(current);
+  if (!context.allowNetwork) return listProviderModels(current, resolveCost);
 
   const apiKey = apiKeyFromCredential(context.credential);
-  if (!apiKey || context.signal.aborted) return listProviderModels(current);
+  if (!apiKey || context.signal.aborted) return listProviderModels(current, resolveCost);
 
   const now = Date.now();
   if (
@@ -98,17 +100,17 @@ export async function refreshAntigravityModels(
     now >= checkedAt &&
     now - checkedAt < getCatalogRefreshIntervalMs()
   ) {
-    return listProviderModels(current);
+    return listProviderModels(current, resolveCost);
   }
 
   try {
     const discovered = await discoverAntigravityModels(apiKey, context.signal);
-    if (context.signal.aborted) return listProviderModels(current);
+    if (context.signal.aborted) return listProviderModels(current, resolveCost);
     const next = resolvedCatalog(discovered, current);
     if (next.models.length > 0 && discovered.models.length > 0) {
       applyAntigravityCatalog(next);
       const refreshedAt = Date.now();
-      const listed = listProviderModels(getCurrentAntigravityCatalog());
+      const listed = listProviderModels(getCurrentAntigravityCatalog(), resolveCost);
       await context.publish({
         persist: {
           models: toStoredModels(listed),
@@ -127,7 +129,7 @@ export async function refreshAntigravityModels(
     if (context.force) throw error;
   }
 
-  return listProviderModels(getCurrentAntigravityCatalog());
+  return listProviderModels(getCurrentAntigravityCatalog(), resolveCost);
 }
 
 function isCatalog(value: unknown): value is AntigravityCatalog {

@@ -7,6 +7,7 @@ import {
   buildAntigravityCatalog,
   buildAntigravityImageModels,
   clearModelEnumCache,
+  costForModelId,
   getAntigravityRequestModelId,
   getModelEnum,
   hydrateAntigravityCatalog,
@@ -165,6 +166,9 @@ globalThis.fetch = async () =>
   new Response(
     JSON.stringify({
       models: {
+        "gemini-4-argon-low": info("Gemini 4 Argon (Low)", { model: "MODEL_ARGON_LOW" }),
+        "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)", { model: "MODEL_ARGON_MEDIUM" }),
+        "gemini-4-argon-high": info("Gemini 4 Argon (High)", { model: "MODEL_ARGON_HIGH" }),
         "gemini-10.0-flash-low": {
           displayName: "Gemini 10.0 Flash (Low)",
           model: "MODEL_DYNAMIC_1000",
@@ -189,11 +193,34 @@ try {
     ANTIGRAVITY_PERSIST_KEY
   ] as { catalog?: AntigravityCatalog; modelEnums?: Record<string, string> } | undefined;
   assert(persisted?.catalog?.routing, "persists routing with the model list");
+  const argon = persisted.catalog.models.find((model) => model.id === "gemini-4-argon");
+  assert(argon?.name === "Gemini 4 Argon (Antigravity)", "discovers Argon without a static seed");
+  assert(argon && "thinkingLevelMap" in argon, "Argon exposes thinking controls");
+  const argonCost = costForModelId("gemini-4-argon");
+  assert(
+    argonCost &&
+      argon.cost.input === argonCost.input &&
+      argon.cost.output === argonCost.output &&
+      argon.cost.cacheRead === argonCost.cacheRead,
+    "Argon uses its resolved pricing instead of the first Flash template",
+  );
+  const price = (id: string) => ANTIGRAVITY_MODELS.find((model) => model.id === id)?.cost;
+  assert(price("gemini-3.8-flash")?.input === 0.75, "Gemini 3.8 Flash price");
+  assert(price("gemini-3.5-flash")?.input === 1.5, "Gemini 3.5 Flash price");
+  assert(price("claude-opus-4-6")?.input === 5, "Claude Opus 4.6 price");
+  assert(price("claude-sonnet-4-6")?.output === 15, "Claude Sonnet 4.6 price");
+  for (const level of ["low", "medium", "high"] as const) {
+    const runtimeId = `gemini-4-argon-${level}`;
+    assert(argon.thinkingLevelMap?.[level] === level, `Argon advertises ${level}`);
+    assert(getAntigravityRequestModelId("gemini-4-argon", level) === runtimeId, `routes Argon ${level}`);
+    assert(persisted.modelEnums?.[runtimeId] === `MODEL_ARGON_${level.toUpperCase()}`, `persists Argon ${level} enum`);
+  }
   assert(
     persisted?.modelEnums?.["gemini-10.0-flash-low"] === "MODEL_DYNAMIC_1000",
     "persists discovered enum values",
   );
   const storedModels = publishedPersistModels(published);
+  assert(storedModels?.some((model) => model.id === "gemini-4-argon"), "publishes Argon to Pi");
   const storedImage = storedModels?.find((model) => model.id === "gemini-3-pro-image");
   assert(storedImage?.type === "image" && storedImage.api === ANTIGRAVITY_IMAGE_API, "persists image models as image");
   assert(

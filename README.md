@@ -88,11 +88,14 @@ again and complete Google sign-in with the other account. Manage and switch acco
 /antigravity
 ```
 
-`/antigravity` opens an interactive, zero-latency Control Center:
+`/antigravity` opens a multi-tab, zero-latency interactive Control Center (`Tab` / `Shift+Tab`, `←`/`→`, or `1`–`4` to switch tabs):
 
-- **Instant launch & progressive loading:** Opens immediately without waiting for quota network calls. You can switch immediately while quotas stream in asynchronously.
-- **Two-row quota dashboard:** Clean barcode sparklines (`▰▰▰▰▱`) per account for Gemini and Claude/GPT pools, with 5h short-window and weekly long-window pools and pixel-aligned countdowns.
-- **In-place shortcuts:** `↑`/`↓` (or `j`/`k`) to navigate, `Enter` to switch, `d` then `y` to unlink, and `Esc` to close.
+- **`[1 账号]` Accounts & Quotas:** Opens immediately with progressive quota loading. Shows two-row barcode sparklines (`▰▰▰▰▱`) per account for Gemini and Claude/GPT pools across 5h and weekly windows. Press `Enter` to switch account, `r` to refresh quotas, `d` then `y` to unlink.
+- **`[2 模型]` Models & Catalog Sync:** Displays available runtime models with quota bars, reset countdowns, and capability tags. Models and their per-model quota appear as soon as the first endpoint responds; slower endpoints fill in additional models without waiting for subscription or aggregate-quota RPCs. Listing and Pi catalog refresh share concurrent requests. Press `r` or `Enter` to sync/refresh the dynamic model catalog into Pi, or `a` to toggle internal `tab_`/`chat_` models.
+- **`[3 工具]` Tool Activation Management:** View and toggle built-in agent tools (`web_search`, `url_context`, `generate_image`, `analyze_file`). Press `Space`/`Enter` to toggle individual tools or `a` to toggle all. Changes take effect immediately in the current session and persist in `~/.pi/agent/pi-antigravity.json`.
+- **`[4 诊断]` Diagnostics (Doctor):** Inspect sanitized provider diagnostics, active account/tool state, endpoint status, latency, and resolved runtime model.
+
+Account credentials and quota are loaded on demand when visiting Accounts or Models; Tools and Diagnostics do not trigger those network calls. Auxiliary account RPCs have a five-second total timeout per fallback chain, and subscription-required quota errors are not retried across endpoints.
 
 Outside the terminal UI, the same command prints the dashboard. If a dialog UI is available, it then opens a selector to switch.
 
@@ -105,9 +108,9 @@ The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credential
 1. `/login antigravity` opens Google sign-in and starts a temporary callback listener at `http://localhost:51121/oauth-callback`.
 2. After you approve access, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
 3. Pi refreshes access tokens automatically when they expire — you shouldn't need to sign in again unless a token is revoked.
-4. Successful logins and token rotations are also kept in `~/.pi/agent/antigravity-accounts.json` with owner-only permissions so linked accounts can be switched without re-authenticating.
+4. Successful logins and token rotations are also kept alongside tool preferences in `~/.pi/agent/pi-antigravity.json` with owner-only (`0600`) permissions so linked accounts can be switched without re-authenticating. An existing `antigravity-accounts.json` is automatically merged into this store and removed only after a successful write.
 
-The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and account files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
+The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and settings files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
 
 Signing in requests these Google OAuth scopes:
 
@@ -129,11 +132,7 @@ Review these permissions before approving access. If your credentials expire or 
 | --- | --- |
 | `/login antigravity` | Sign in to Google and configure the provider. |
 | `/model antigravity/<model-id>` | Choose a registered Antigravity model. |
-| `/antigravity` | Open the interactive Control Center: compare linked accounts' quota, switch with `Enter`, unlink with `d` then `y`. |
-| `/antigravity models` | Refresh the dynamic model catalog into Pi, then list available runtime models with remaining shared-pool quota and capabilities. |
-| `/antigravity models all` | Include tab/chat models normally hidden from the model list. |
-| `/antigravity doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
-| `/antigravity.usage` | Compatibility alias of `/antigravity`. |
+| `/antigravity` | Open the multi-tab interactive Control Center (`1 账号` · `2 模型` · `3 工具` · `4 诊断`). Optional subcommands (`models`, `tools`, `doctor`) jump directly to that tab in TUI mode or print text reports in headless mode. |
 | `/file <path> [question]` | Mount one local file for Antigravity Gemini; optionally send a question immediately. |
 | `/file status` / `/file clear` | Inspect or detach the current file attachment. |
 

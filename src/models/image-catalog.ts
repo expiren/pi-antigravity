@@ -1,4 +1,5 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { costForModelId, repriceModel, type PricingResolver } from "./pricing.js";
 import type { ModelInfoRaw } from "../types/types.js";
 
 /** Image API key on this provider. Chat stays on `antigravity-api`. */
@@ -65,13 +66,15 @@ export function buildAntigravityImageModels(
 }
 
 /** Chat models plus image models. A refresh must return this, or image models disappear. */
-export function listProviderModels(catalog: {
-  models: ProviderModelConfig[];
-  imageModels?: ProviderModelConfig[];
-}): ProviderModelConfig[] {
+export function listProviderModels(
+  catalog: { models: ProviderModelConfig[]; imageModels?: ProviderModelConfig[] },
+  resolveCost: PricingResolver = costForModelId,
+): ProviderModelConfig[] {
   const images = catalog.imageModels?.filter((model) => model.type === "image");
   return [
-    ...catalog.models.filter((model) => model.type !== "image"),
+    ...catalog.models
+      .filter((model) => model.type !== "image")
+      .map((model) => repriceModel(model, resolveCost)),
     ...(images && images.length > 0 ? images : ANTIGRAVITY_IMAGE_MODELS),
   ];
 }

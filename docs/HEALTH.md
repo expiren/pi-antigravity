@@ -9,8 +9,12 @@ sources retain their interfaces.
 
 `antigravity-account-health.json` is created on the first selection/update, beside the account
 store in the resolved agent directory. `PI_CODING_AGENT_DIR` remains an explicit override;
-otherwise both account and health stores use the host SDK's `getAgentDir()`, including OmO's
-configured directory. No account-format migration is performed.
+otherwise settings, accounts, and health use the host SDK's `getAgentDir()`, including OmO's
+configured directory. Reading a V3 `antigravity-accounts.json` store does not migrate or
+rewrite it. The first explicit account or tool-setting update copies its version 1 accounts
+into private `pi-antigravity.json` alongside tool preferences, retaining stable IDs and
+leaving the original file intact. The unified copy is authoritative on subsequent reads;
+the health database stays separate and unchanged by this migration.
 
 Schema version 1 records are keyed by SHA-256 of the existing stable account ID, exact resolved
 request project, and normalized runtime model. Refreshing access or refresh tokens does not

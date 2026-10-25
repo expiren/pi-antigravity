@@ -1,6 +1,7 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityRouting, ModelInfoRaw } from "../types/types.js";
+import { costForModelId } from "./pricing.js";
 
 export type AntigravityCatalog = {
   models: ProviderModelConfig[];
@@ -255,7 +256,7 @@ function synthesizeModel(
       thinkingLevelMap: reasoning ? thinkingLevelMapFromLevels(advertisedLevels) : undefined,
       input: supportsImages ? ["text", "image"] : ["text"],
       ...(supportsImages && template?.inputLimits ? { inputLimits: template.inputLimits } : {}),
-      cost: template?.cost ?? ZERO_COST,
+      cost: costForModelId(group.publicId) ?? template?.cost ?? ZERO_COST,
       contextWindow: asChatModel(template)?.contextWindow ?? 128000,
       maxTokens: asChatModel(template)?.maxTokens ?? 8192,
     },
