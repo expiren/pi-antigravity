@@ -53,7 +53,11 @@ if (-not $full) { throw 'rights' }
 [Console]::Write('PRIVATE')
 `;
 
+/** Opt-in in-process timings; never records paths or file contents. */
+export const healthAclMetrics = { calls: 0, elapsedMs: 0 };
+
 function windowsPrivate(path: string, set: boolean): void {
+  const started = process.env.ANTIGRAVITY_HEALTH_METRICS === "1" ? performance.now() : undefined;
   try {
     const result = execFileSync(
       "powershell.exe",
@@ -77,6 +81,11 @@ function windowsPrivate(path: string, set: boolean): void {
       "unsafe",
       "Health file ACL could not be verified. Restore a private owner-only ACL before retrying.",
     );
+  } finally {
+    if (started !== undefined) {
+      healthAclMetrics.calls++;
+      healthAclMetrics.elapsedMs += performance.now() - started;
+    }
   }
 }
 

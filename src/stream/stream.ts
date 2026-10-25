@@ -36,6 +36,7 @@ import {
   setLastStatus,
   setLastToolSchemaWarnings,
 } from "../diagnostics/diagnostics.js";
+import { HealthStoreError } from "../health/store.js";
 import {
   AntigravityRequestType,
   AntigravityUserAgent,
@@ -1551,7 +1552,7 @@ export function streamAntigravity(
       const baseRuntimeModel =
         antigravityEnv("RUNTIME_MODEL")?.trim() || getAntigravityRequestModelId(model.id, effort);
       credentialSource =
-        opts.credentialSource?.forRequest?.(baseRuntimeModel) ?? opts.credentialSource;
+        opts.credentialSource?.forRequest?.(baseRuntimeModel, opts.signal) ?? opts.credentialSource;
       let creds: AntigravityApiKey;
       if (credentialSource?.prepare) {
         // Host-provided active auth must not bypass the model-aware account pool.
@@ -1795,9 +1796,24 @@ export function streamAntigravity(
 
       if (!received) throw new Error("Antigravity API returned an empty response");
       if (opts.signal?.aborted) throw new Error("Request was aborted");
-      if (output.stopReason !== "error" && output.stopReason !== "aborted")
-        await credentialSource?.succeeded?.();
-      await credentialSource?.release?.();
+      const delivered = output.stopReason !== "error" && output.stopReason !== "aborted";
+      if (delivered) {
+        try {
+          await credentialSource?.succeeded?.();
+        } catch (error) {
+          if (!(error instanceof HealthStoreError) || error.code !== "busy") throw error;
+          setLastError(`Health success metadata was not recorded: ${safeError(error)}`);
+        }
+      }
+      try {
+        await credentialSource?.release?.();
+      } catch (error) {
+        if (!delivered || !(error instanceof HealthStoreError) || error.code !== "busy")
+          throw error;
+        setLastError(
+          `Health reservation cleanup is deferred until lease expiry: ${safeError(error)}`,
+        );
+      }
       setLastLatencyMs(Date.now() - startTime);
       if (output.stopReason === "error" || output.stopReason === "aborted") {
         const errorDetail =

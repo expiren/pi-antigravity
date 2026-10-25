@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { closeSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { updateRememberedAccount, syncCurrentAuth, activateAccount } from "../src/auth/accounts.js";
 import { classifyHealthFailure } from "../src/health/classification.js";
+import { createPrivateFile } from "../src/health/private-file.js";
 import { healthScope, recordKey } from "../src/health/scope.js";
 import { healthSummary } from "../src/health/report.js";
 import { RESERVATION_MS } from "../src/health/selection.js";
-import { HealthStore } from "../src/health/store.js";
+import { HealthStore, HealthStoreError } from "../src/health/store.js";
 import { PersistentCredentialSource } from "../src/runtime/persistent-credential-source.js";
 import { getLastDiagnostics } from "../src/diagnostics/diagnostics.js";
 import {
@@ -26,6 +27,50 @@ async function test(name: string, run: (f: Fixture) => Promise<void> | void) {
   console.log(`PASS ${++passed}. ${name}`);
 }
 const failure = { runtimeModel: OPUS, projectId: "test-project", status: 429, body: QUOTA };
+
+await test("a brief live lock does not abort account selection", async (f) => {
+  const lock = `${f.store.path}.lock`;
+  const fd = createPrivateFile(lock);
+  try {
+    writeFileSync(
+      fd,
+      JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        id: "00000000-0000-4000-8000-000000000000",
+        createdAt: f.now,
+        expiresAt: f.now + 30_000,
+      }),
+    );
+  } finally {
+    closeSync(fd);
+  }
+  queueMicrotask(() => unlinkSync(lock));
+  assert.equal((await f.source().current()).token, "fake-access-0");
+  assert.equal(Object.keys(f.store.snapshot().reservations).length, 1);
+});
+
+await test("a brief acquisition gate does not drop a quota failure", async (f) => {
+  const source = f.source();
+  await source.current();
+  const gate = `${f.store.path}.lock-recovery`;
+  const fd = createPrivateFile(gate);
+  closeSync(fd);
+  queueMicrotask(() => unlinkSync(gate));
+  await source.failed(failure);
+  assert.equal(Object.values(f.store.snapshot().records)[0]?.status, "hard_quota");
+  assert.equal(Object.keys(f.store.snapshot().reservations).length, 0);
+});
+
+await test("a persistent orphan gate stays untouched after bounded contention", async (f) => {
+  const gate = `${f.store.path}.lock-recovery`;
+  closeSync(createPrivateFile(gate));
+  await assert.rejects(
+    f.source().current(),
+    (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+  );
+  assert.equal(existsSync(gate), true);
+});
 
 await test("hard Opus quota is durable before the next normal request", async (f) => {
   const result = await request(f, (_token, attempt) =>
@@ -208,6 +253,106 @@ await test("parallel reservations avoid duplicate accounts and expire after aban
   f.now += RESERVATION_MS + 1;
   assert((await f.source().current()).token);
   assert.equal(Object.keys(f.store.snapshot().reservations).length, 1);
+});
+
+await test("concurrent quota failures preserve both committed cooldowns", async (f) => {
+  const first = f.source();
+  const second = f.source();
+  await Promise.all([first.current(), second.current()]);
+  await Promise.all([first.failed(failure), second.failed(failure)]);
+  const state = new HealthStore(f.store.path).snapshot();
+  assert.equal(
+    Object.values(state.records).filter((record) => record.status === "hard_quota").length,
+    2,
+  );
+  assert.equal(Object.keys(state.reservations).length, 0);
+});
+
+await test("concurrent success and release clear only their own reservations", async (f) => {
+  const first = f.source();
+  const second = f.source();
+  await Promise.all([first.current(), second.current()]);
+  await Promise.all([first.succeeded(), second.release()]);
+  const state = new HealthStore(f.store.path).snapshot();
+  assert.equal(Object.keys(state.reservations).length, 0);
+  assert.equal(
+    Object.values(state.records).filter((record) => record.lastSuccessAt === f.now).length,
+    1,
+  );
+});
+
+await test("brief success contention still commits metadata and releases the reservation", async (f) => {
+  const source = f.source();
+  await source.current();
+  const gate = `${f.store.path}.lock-recovery`;
+  closeSync(createPrivateFile(gate));
+  queueMicrotask(() => unlinkSync(gate));
+  await source.succeeded();
+  const state = f.store.snapshot();
+  assert.equal(Object.keys(state.reservations).length, 0);
+  assert.equal(
+    Object.values(state.records).filter((record) => record.lastSuccessAt === f.now).length,
+    1,
+  );
+});
+
+await test("success and cleanup reuse one post-output lock deadline", async (f) => {
+  const source = f.source();
+  await source.current();
+  const deadlines: number[] = [];
+  f.store.updateWhenAvailable = async (...args) => {
+    assert.equal(typeof args[2], "number");
+    deadlines.push(args[2]!);
+    throw new HealthStoreError("busy", "ANTIGRAVITY_HEALTH_BUSY: cleanup unavailable");
+  };
+  await assert.rejects(
+    source.succeeded(),
+    (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+  );
+  await assert.rejects(
+    source.release(),
+    (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+  );
+  assert.equal(deadlines.length, 2);
+  assert.equal(deadlines[0], deadlines[1]);
+});
+
+await test("a shorter lock-wait override is shared by success and release", async (f) => {
+  const source = f.source();
+  await source.current();
+  const gate = `${f.store.path}.lock-recovery`;
+  closeSync(createPrivateFile(gate));
+  const previousWait = process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+  process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = "1";
+  const originalNow = performance.now;
+  let monotonic = 1_000;
+  performance.now = () => monotonic;
+  const originalUpdate = f.store.update.bind(f.store);
+  let attempts = 0;
+  f.store.update = (fn) => {
+    attempts++;
+    assert.equal(attempts, 1, "cleanup started another transaction after its shared deadline");
+    monotonic += 2;
+    return originalUpdate(fn);
+  };
+  try {
+    await assert.rejects(
+      source.succeeded(),
+      (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+    );
+    await assert.rejects(
+      source.release(),
+      (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+    );
+    assert.equal(attempts, 1);
+    assert.equal(existsSync(gate), true);
+  } finally {
+    f.store.update = originalUpdate;
+    performance.now = originalNow;
+    if (previousWait === undefined) delete process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+    else process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = previousWait;
+    unlinkSync(gate);
+  }
 });
 
 await test("corrupt health state fails closed before any provider attempt", async (f) => {
