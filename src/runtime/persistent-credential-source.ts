@@ -4,9 +4,11 @@ import { setHealthSelection, type HealthSelection } from "../diagnostics/diagnos
 import { classifyHealthFailure } from "../health/classification.js";
 import { healthScope, recordKey } from "../health/scope.js";
 import { HealthPoolError, selectAccount } from "../health/selection.js";
-import { HealthStore, healthStorePath } from "../health/store.js";
+import { HealthStore, healthLockWaitMs, healthStorePath } from "../health/store.js";
 import type { HealthScope } from "../health/types.js";
 import type { AntigravityApiKey, CredentialFailure, CredentialSource } from "../types/types.js";
+
+const POST_OUTPUT_LOCK_WAIT_MS = 25_000;
 
 /** Per-request state, never shared by concurrent streams using the default source. */
 export class PersistentCredentialSource implements CredentialSource {
@@ -16,11 +18,14 @@ export class PersistentCredentialSource implements CredentialSource {
   private accountId?: string;
   private creds?: AntigravityApiKey;
   private selection?: HealthSelection;
+  private reserved = false;
+  private cleanupDeadline?: number;
 
   constructor(
     private model: string,
     private readonly store = new HealthStore(healthStorePath()),
     private readonly now: () => number = () => Date.now(),
+    private readonly signal?: AbortSignal,
   ) {}
 
   private async select(
@@ -33,20 +38,22 @@ export class PersistentCredentialSource implements CredentialSource {
       syncCurrentAuth();
       accounts = loadAccountStore(true);
     }
-    const chosen = this.store.update((state) =>
-      selectAccount({
-        state,
-        accounts: Object.values(accounts.accounts),
-        activeAccountId: accounts.activeAccountId,
-        model: this.model,
-        excluded: new Set(
-          [...this.triedIds].filter((id) => id !== this.scope?.accountId || !preferredAccountId),
-        ),
-        excludedTokens,
-        reservationId: this.reservationId,
-        now: this.now(),
-        preferredAccountId,
-      }),
+    const chosen = await this.store.updateWhenAvailable(
+      (state) =>
+        selectAccount({
+          state,
+          accounts: Object.values(accounts.accounts),
+          activeAccountId: accounts.activeAccountId,
+          model: this.model,
+          excluded: new Set(
+            [...this.triedIds].filter((id) => id !== this.scope?.accountId || !preferredAccountId),
+          ),
+          excludedTokens,
+          reservationId: this.reservationId,
+          now: this.now(),
+          preferredAccountId,
+        }),
+      this.signal,
     );
     if (chosen instanceof HealthPoolError) {
       setHealthSelection({
@@ -61,7 +68,9 @@ export class PersistentCredentialSource implements CredentialSource {
     }
     const changedIdentity =
       this.scope !== undefined && this.scope.accountId !== chosen.scope.accountId;
+    this.cleanupDeadline = undefined;
     this.scope = chosen.scope;
+    this.reserved = true;
     this.accountId = chosen.account.accountId;
     this.triedIds.add(chosen.scope.accountId);
     this.selection = {
@@ -106,7 +115,7 @@ export class PersistentCredentialSource implements CredentialSource {
     }
     if (failure.global) return false;
     const scope = healthScope(this.accountId, observation.projectId, observation.runtimeModel);
-    this.store.update((state) => {
+    await this.store.updateWhenAvailable((state) => {
       const key = recordKey(scope);
       const previous = state.records[key];
       const keepPrevious = previous && previous.cooldownUntil > failure.cooldownUntil;
@@ -122,36 +131,48 @@ export class PersistentCredentialSource implements CredentialSource {
         observedAt: this.now(),
       };
       delete state.reservations[this.reservationId];
-    });
+    }, this.signal);
+    this.reserved = false;
     return failure.status !== "auth_error";
   }
 
   async succeeded(): Promise<void> {
     if (!this.scope) return;
     const scope = this.scope;
-    this.store.update((state) => {
-      const key = recordKey(scope);
-      const previous = state.records[key];
-      // Success cannot clear a cooldown observed by a newer sibling request.
-      const cooling = previous && previous.cooldownUntil > this.now();
-      state.records[key] = {
-        ...previous,
-        ...scope,
-        status: cooling ? previous.status : "unknown",
-        reason: cooling ? previous.reason : "unknown",
-        cooldownUntil: cooling ? previous.cooldownUntil : 0,
-        observedAt: cooling ? previous.observedAt : this.now(),
-        lastSuccessAt: this.now(),
-      };
-      delete state.reservations[this.reservationId];
-    });
+    await this.store.updateWhenAvailable(
+      (state) => {
+        const key = recordKey(scope);
+        const previous = state.records[key];
+        // Success cannot clear a cooldown observed by a newer sibling request.
+        const cooling = previous && previous.cooldownUntil > this.now();
+        state.records[key] = {
+          ...previous,
+          ...scope,
+          status: cooling ? previous.status : "unknown",
+          reason: cooling ? previous.reason : "unknown",
+          cooldownUntil: cooling ? previous.cooldownUntil : 0,
+          observedAt: cooling ? previous.observedAt : this.now(),
+          lastSuccessAt: this.now(),
+        };
+        delete state.reservations[this.reservationId];
+      },
+      this.signal,
+      (this.cleanupDeadline ??=
+        performance.now() + Math.min(POST_OUTPUT_LOCK_WAIT_MS, healthLockWaitMs())),
+    );
+    this.reserved = false;
   }
 
   async release(): Promise<void> {
-    if (!this.scope) return;
-    if (!this.store.snapshot().reservations[this.reservationId]) return;
-    this.store.update((state) => {
-      delete state.reservations[this.reservationId];
-    });
+    if (!this.reserved) return;
+    await this.store.updateWhenAvailable(
+      (state) => {
+        delete state.reservations[this.reservationId];
+      },
+      undefined,
+      (this.cleanupDeadline ??=
+        performance.now() + Math.min(POST_OUTPUT_LOCK_WAIT_MS, healthLockWaitMs())),
+    );
+    this.reserved = false;
   }
 }

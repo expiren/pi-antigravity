@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs, { closeSync, unlinkSync, writeFileSync } from "node:fs";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { HealthStoreError } from "./errors.js";
 import {
   assertPrivateFile,
@@ -22,6 +23,37 @@ export const HEALTH_MAX_RESERVATIONS = 4096;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
 const STALE_MS = 90 * 24 * 60 * 60 * 1000;
 const LOCK_MS = 30_000;
+const pendingTransactions = new Map<string, Promise<void>>();
+const metricsEnabled = process.env.ANTIGRAVITY_HEALTH_METRICS === "1";
+/** Opt-in timings for simulated stress tests; no paths or state values are recorded. */
+export const healthStoreMetrics = {
+  transactions: 0,
+  acquisitionMs: 0,
+  holdMs: 0,
+  stateReadValidationMs: 0,
+  callbackMs: 0,
+  stateMutationValidationMs: 0,
+  serializationMs: 0,
+  jsonWriteMs: 0,
+  fsyncMs: 0,
+};
+
+export function healthLockWaitMs(): number {
+  const configured = process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+  const waitMs = configured === undefined ? 60_000 : Number(configured);
+  if (
+    (configured !== undefined && !/^(0|[1-9]\d*)$/.test(configured)) ||
+    !Number.isSafeInteger(waitMs) ||
+    waitMs < 0 ||
+    waitMs > 60_000
+  ) {
+    throw new HealthStoreError(
+      "invalid",
+      "ANTIGRAVITY_HEALTH_LOCK_WAIT_MS must be an integer from 0 to 60000.",
+    );
+  }
+  return waitMs;
+}
 
 function invalid(): never {
   throw new HealthStoreError(
@@ -177,6 +209,14 @@ function readOwner(path: string): LockOwner {
     value = object(JSON.parse(readPrivateFile(path, 1024)));
   } catch (error) {
     if (isMissing(error)) throw error;
+    // Windows ACL verification runs in a subprocess; the previous owner can
+    // unlink its lock during that check. Under the acquisition gate, a
+    // missing lock is safe to treat as released, never as a stale owner.
+    try {
+      fs.lstatSync(path);
+    } catch (after) {
+      if (isMissing(after)) throw after;
+    }
     throw new HealthStoreError(
       "unsafe",
       "Health lock owner is unreadable. Stop all users of this store before removing orphan lock files.",
@@ -219,13 +259,15 @@ function busy(): never {
   );
 }
 
-function safeError(error: unknown): HealthStoreError {
-  return error instanceof HealthStoreError
-    ? error
-    : new HealthStoreError(
-        "io",
-        "Health state could not be safely read or written. Check private-file access and free disk space.",
-      );
+function safeError(error: unknown, stage?: string): HealthStoreError {
+  if (error instanceof HealthStoreError) return error;
+  const os = error as NodeJS.ErrnoException;
+  const detail =
+    typeof os?.code === "string" && /^[A-Z0-9_]+$/.test(os.code) ? ` (OS ${os.code})` : "";
+  return new HealthStoreError(
+    "io",
+    `Health state could not be safely read or written${stage ? ` during ${stage}` : ""}${detail}. Check private-file access and free disk space.`,
+  );
 }
 
 export function healthStorePath(): string {
@@ -268,18 +310,32 @@ export class HealthStore {
   update<T>(fn: (state: HealthState) => T): T {
     let release: (() => void) | undefined;
     let temporary: string | undefined;
+    const started = metricsEnabled ? performance.now() : 0;
+    let acquiredAt = 0;
     try {
       const now = this.now();
       if (!timestamp(now) || now > MAX_TIMESTAMP - LOCK_MS) invalid();
       ensureHealthDirectory(this.path);
       release = this.acquire(now);
+      if (metricsEnabled) {
+        acquiredAt = performance.now();
+        healthStoreMetrics.transactions++;
+        healthStoreMetrics.acquisitionMs += acquiredAt - started;
+      }
       const state = this.snapshot();
+      let checkpoint = metricsEnabled ? performance.now() : 0;
+      if (metricsEnabled) healthStoreMetrics.stateReadValidationMs += checkpoint - acquiredAt;
       const sequence = state.sequence;
       let result: T;
       try {
         result = fn(state);
         if (result && typeof (result as { then?: unknown }).then === "function") {
           throw new Error();
+        }
+        if (metricsEnabled) {
+          const next = performance.now();
+          healthStoreMetrics.callbackMs += next - checkpoint;
+          checkpoint = next;
         }
       } catch {
         throw new HealthStoreError(
@@ -293,8 +349,17 @@ export class HealthStore {
       state.updatedAt = now;
       prune(state, now);
       validate(state);
+      if (metricsEnabled) {
+        const next = performance.now();
+        healthStoreMetrics.stateMutationValidationMs += next - checkpoint;
+        checkpoint = next;
+      }
       const text = `${JSON.stringify(state)}\n`;
-      if (Buffer.byteLength(text, "utf8") > HEALTH_MAX_BYTES) {
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (metricsEnabled) {
+        healthStoreMetrics.serializationMs += performance.now() - checkpoint;
+      }
+      if (bytes > HEALTH_MAX_BYTES) {
         throw new HealthStoreError(
           "capacity",
           "Health state is full; live cooldowns were retained and no update was committed.",
@@ -303,8 +368,14 @@ export class HealthStore {
       temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
       const fd = createPrivateFile(temporary);
       try {
+        const writeStarted = metricsEnabled ? performance.now() : 0;
         writeFileSync(fd, text, "utf8");
+        const fsyncStarted = metricsEnabled ? performance.now() : 0;
         fs.fsyncSync(fd);
+        if (metricsEnabled) {
+          healthStoreMetrics.jsonWriteMs += fsyncStarted - writeStarted;
+          healthStoreMetrics.fsyncMs += performance.now() - fsyncStarted;
+        }
       } finally {
         closeSync(fd);
       }
@@ -327,7 +398,91 @@ export class HealthStore {
           // A failed pre-commit write can leave only a private, uniquely named temporary file.
         }
       }
-      if (release) release();
+      if (release) {
+        try {
+          release();
+        } finally {
+          if (metricsEnabled) healthStoreMetrics.holdMs += performance.now() - acquiredAt;
+        }
+      }
+    }
+  }
+
+  async updateWhenAvailable<T>(
+    fn: (state: HealthState) => T,
+    signal?: AbortSignal,
+    latestStart?: number,
+  ): Promise<T> {
+    const waitMs = healthLockWaitMs();
+    const started = performance.now();
+    const deadline = Math.min(started + waitMs, latestStart ?? Infinity);
+    const allowedMs = Math.max(0, Math.round(deadline - started));
+    const key = process.platform === "win32" ? this.path.toLowerCase() : this.path;
+    const previous = pendingTransactions.get(key);
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const current = (previous ?? Promise.resolve()).then(() => completed);
+    pendingTransactions.set(key, current);
+    let waitingForPrevious = !!previous;
+    let onAbort: (() => void) | undefined;
+    const abortError = () => new Error("Request was aborted");
+    const exhausted = () =>
+      new HealthStoreError(
+        "busy",
+        `ANTIGRAVITY_HEALTH_BUSY: Health state remained busy for ${allowedMs} ms; check the lock owner and gate-directory ACL before retrying.`,
+      );
+    try {
+      if (signal?.aborted) throw abortError();
+      if (latestStart !== undefined && performance.now() >= latestStart && waitMs !== 0)
+        throw exhausted();
+      if (previous) {
+        const timeout = new AbortController();
+        try {
+          const aborted = signal
+            ? new Promise<never>((_, reject) => {
+                onAbort = () => reject(abortError());
+                signal.addEventListener("abort", onAbort, { once: true });
+              })
+            : undefined;
+          const outcome = await Promise.race([
+            previous.then(() => "ready" as const),
+            delay(Math.max(0, deadline - performance.now()), "timeout" as const, {
+              signal: timeout.signal,
+            }),
+            ...(aborted ? [aborted] : []),
+          ]);
+          if (outcome === "ready") waitingForPrevious = false;
+          if (outcome === "timeout" || performance.now() >= deadline) throw exhausted();
+        } finally {
+          timeout.abort();
+        }
+      }
+      let firstAttempt = true;
+      for (;;) {
+        if (signal?.aborted) throw abortError();
+        if ((!firstAttempt || waitMs !== 0) && performance.now() >= deadline) throw exhausted();
+        firstAttempt = false;
+        try {
+          return this.update(fn);
+        } catch (error) {
+          const remaining = deadline - performance.now();
+          if (!(error instanceof HealthStoreError) || error.code !== "busy") throw error;
+          if (remaining <= 0) throw exhausted();
+          await delay(Math.min(25 + Math.random() * 50, remaining), undefined, { signal });
+        }
+      }
+    } finally {
+      if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+      finish();
+      if (waitingForPrevious) {
+        void current.then(() => {
+          if (pendingTransactions.get(key) === current) pendingTransactions.delete(key);
+        });
+      } else if (pendingTransactions.get(key) === current) {
+        pendingTransactions.delete(key);
+      }
     }
   }
 
@@ -338,13 +493,15 @@ export class HealthStore {
     try {
       gateFd = createPrivateFile(gate);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Windows can report EPERM while another process removes this exclusive gate.
+      if (code === "EEXIST" || (process.platform === "win32" && code === "EPERM")) {
         throw new HealthStoreError(
           "busy",
-          "Health lock acquisition or recovery is busy. If it persists, stop all store users before removing the orphan .lock-recovery file.",
+          "Health lock acquisition or recovery is busy. If it persists, check the gate-directory ACL and stop all store users before removing an orphan .lock-recovery file.",
         );
       }
-      throw error;
+      throw safeError(error, "lock acquisition gate creation");
     }
     const owner: LockOwner = {
       version: 1,

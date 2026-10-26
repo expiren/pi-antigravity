@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { getLastDiagnostics } from "../src/diagnostics/diagnostics.js";
+import { HealthStoreError } from "../src/health/store.js";
+import type { CredentialSource } from "../src/types/types.js";
 import {
   fixture,
   account,
@@ -198,4 +200,65 @@ await fixture(async (f) => {
   assert.equal(result.attempted.length, 1);
 });
 console.log("PASS evidenced global 429 stops endpoint drift and account rotation");
-console.log("Health stream: 8/8 deterministic integration scenarios passed.");
+
+await fixture(async (f) => {
+  let cleanupCalls = 0;
+  const source: CredentialSource = {
+    current: async () => ({ token: "fake-access-0", projectId: "project-test" }),
+    rotate: async () => {
+      throw new Error("Cleanup must not trigger another provider attempt.");
+    },
+    succeeded: async () => {
+      cleanupCalls++;
+      throw new HealthStoreError("busy", "ANTIGRAVITY_HEALTH_BUSY: temporary success contention");
+    },
+    release: async () => {
+      cleanupCalls++;
+      throw new HealthStoreError("busy", "ANTIGRAVITY_HEALTH_BUSY: temporary cleanup contention");
+    },
+  };
+  const result = await request(f, () => success(), { credentialSource: source });
+  assert.equal(result.events.at(-1)?.type, "done");
+  assert.deepEqual(result.attempted, ["fake-access-0"]);
+  assert.equal(cleanupCalls, 2);
+  assert.match(getLastDiagnostics().error ?? "", /ANTIGRAVITY_HEALTH_BUSY/);
+});
+console.log("PASS optional post-output busy cleanup preserves the completed response");
+
+await fixture(async (f) => {
+  const source: CredentialSource = {
+    current: async () => ({ token: "fake-access-0", projectId: "project-test" }),
+    rotate: async () => {
+      throw new Error("Unsafe health cleanup must not trigger account rotation.");
+    },
+    succeeded: async () => {
+      throw new HealthStoreError("unsafe", "Private health file ACL is unsafe.");
+    },
+  };
+  const result = await request(f, () => success(), { credentialSource: source });
+  assert.deepEqual(result.attempted, ["fake-access-0"]);
+  assert.match(terminalError(result.events), /health file ACL is unsafe/);
+});
+console.log("PASS unsafe post-output health errors remain actionable");
+
+await fixture(async (f) => {
+  let rotations = 0;
+  const source: CredentialSource = {
+    current: async () => ({ token: "fake-access-0", projectId: "project-test" }),
+    rotate: async () => {
+      rotations++;
+      throw new Error("Missing quota persistence must not rotate.");
+    },
+    failed: async () => {
+      throw new HealthStoreError("busy", "ANTIGRAVITY_HEALTH_BUSY: quota write not committed");
+    },
+  };
+  const result = await request(f, () => new Response("quota", { status: 429 }), {
+    credentialSource: source,
+  });
+  assert.deepEqual(result.attempted, ["fake-access-0"]);
+  assert.equal(rotations, 0);
+  assert.match(terminalError(result.events), /ANTIGRAVITY_HEALTH_BUSY/);
+});
+console.log("PASS quota-write contention fails closed without extra provider traffic");
+console.log("Health stream: 11/11 deterministic integration scenarios passed.");

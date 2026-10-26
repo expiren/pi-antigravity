@@ -9,12 +9,12 @@ export class AccountCredentialSource implements CredentialSource {
     private readonly apiKeyGetter?: () => Promise<string | undefined> | string | undefined,
   ) {}
 
-  forRequest(runtimeModel: string): CredentialSource {
+  forRequest(runtimeModel: string, signal?: AbortSignal): CredentialSource {
     if (this.apiKeyGetter) {
       // Legacy custom getters have no stable identity contract.
       return { current: () => this.current(), rotate: (excluded) => this.rotate(excluded) };
     }
-    return new PersistentCredentialSource(runtimeModel);
+    return new PersistentCredentialSource(runtimeModel, undefined, undefined, signal);
   }
 
   async current(): Promise<AntigravityApiKey> {

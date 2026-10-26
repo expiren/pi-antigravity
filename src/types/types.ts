@@ -50,7 +50,7 @@ export interface CredentialSource {
   /** Select an eligible untried account for pre-output recovery; undefined when exhausted. */
   rotate(excluded: ReadonlySet<string>): Promise<AntigravityApiKey | undefined>;
   /** Optional V3 hooks; legacy single-key and test sources retain their V2 contract. */
-  forRequest?(runtimeModel: string): CredentialSource;
+  forRequest?(runtimeModel: string, signal?: AbortSignal): CredentialSource;
   prepare?(runtimeModel: string, projectId: string): Promise<AntigravityApiKey>;
   identity?(): string | undefined;
   failed?(observation: CredentialFailure): Promise<boolean>;

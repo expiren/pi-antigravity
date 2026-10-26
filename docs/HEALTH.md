@@ -70,6 +70,49 @@ owner can be recovered. An orphaned acquisition/recovery gate or an unreadable p
 fails closed: stop all users of that exact store before removing only its orphan lock/gate.
 This conservative case requires manual cleanup rather than risking two writers.
 
+Normal credential operations are serialized in FIFO order per canonical store path within
+one process. Different stores remain independent. Across processes they retry only transient
+`busy` locks and acquisition gates, with a monotonic deadline and 25–75 ms jitter. Required
+selection and failure persistence wait up to 60 seconds by default, including time queued
+locally; set `ANTIGRAVITY_HEALTH_LOCK_WAIT_MS` to an integer from 0 to 60000 to override it.
+Cancellation stops waiting before any transaction callback runs. A successful retry re-reads
+the committed state under the lock; callbacks are never replayed after they start. Invalid
+or unsafe state is never retried, and a persistent orphan gate remains untouched. Deadline
+exhaustion reports `ANTIGRAVITY_HEALTH_BUSY`, a local health error, not an HTTP or quota
+response. Direct synchronous store updates still report contention immediately.
+On Windows, cross-process contention has also produced `EPERM` at exclusive gate creation.
+Only this gate-open error is retried; the gate is never bypassed, and persistent permission
+denial exhausts the same bound with guidance to check its directory ACL.
+
+Quota failures must commit their restriction before another account is attempted. A
+successful provider response remains successful when only success metadata or reservation
+cleanup exhausts a shared 25-second contention deadline (or a shorter configured wait):
+release never starts a second full wait after success. An already-started secure transaction
+may take longer, so this bounds lock waiting, not total response latency. The omission is
+visible in `/antigravity doctor`, and any remaining reservation expires after 30 minutes.
+Security, corruption, and I/O errors still surface; no provider retry is triggered by local cleanup.
+The host may separately display a generic provider-failure summary because its structured
+provider diagnostics do not classify local health errors; the local code remains in the
+request error and doctor detail. Set `ANTIGRAVITY_HEALTH_METRICS=1` during isolated
+benchmarks to collect in-process timing counters without file paths or state content.
+
+On Windows with synthetic credentials and a private OS-temp store (October 25, 2026),
+three rounds per process count passed with zero network attempts:
+
+| Processes | Successful operations | Expected busy probes | Successful wait p95 | Successful wait max |
+| --------- | --------------------: | -------------------: | ------------------: | ------------------: |
+| 2         |                    22 |                    2 |              1.76 s |              1.76 s |
+| 4         |                    40 |                    2 |              3.87 s |              4.07 s |
+| 8         |                    76 |                    2 |              8.19 s |              8.55 s |
+| 16        |                   148 |                    2 |             16.70 s |             17.55 s |
+
+At 16 processes, cumulative ACL subprocess time was 319.95 s across 1,600 calls
+(including intentionally held-lock probes); state reading and validation took 29.45 s,
+while serialization, JSON writes, and fsync totaled less than 1 s. Cumulative subprocess
+times across workers are not wall-clock elapsed time. The 60-second required wait retains
+headroom over the measured successful wait; the shorter optional completion budget may omit
+metadata under heavier contention without invalidating delivered provider output.
+
 Reservations expire after 30 minutes and are removed on ordinary completion/failure. A crash
 does not permanently reserve an account; a request running longer than the lease may eventually
 share its candidate with another request. Store limits are 8 MiB, 10,000 records, and 4,096

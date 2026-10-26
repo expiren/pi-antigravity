@@ -654,6 +654,169 @@ test("expired dead-owner lock also recovers without dropping committed state", a
   });
   assert.equal(Object.keys(store.snapshot().records).length, 1);
 });
+test("same-path stores serialize waiting transactions in FIFO order", async () => {
+  const { path, store } = fixture("queued");
+  writePrivate(`${path}.lock-recovery`, "");
+  const other = new HealthStore(join(dirname(path), ".", "queued.json"), { now: () => now });
+  const order: number[] = [];
+  const writes = [store, other, store].map((candidate, index) =>
+    candidate.updateWhenAvailable((state) => {
+      order.push(index);
+      put(state, record(`queued-${index}`));
+    }),
+  );
+  fs.unlinkSync(`${path}.lock-recovery`);
+  await Promise.all(writes);
+  assert.deepEqual(order, [0, 1, 2]);
+  assert.equal(store.snapshot().sequence, 3);
+  assert.equal(Object.keys(store.snapshot().records).length, 3);
+});
+test("cancelling a queued transaction does not let successors overtake its owner", async () => {
+  const { path, store } = fixture("queued-cancel");
+  writePrivate(`${path}.lock-recovery`, "");
+  const calls: string[] = [];
+  const first = store.updateWhenAvailable(() => calls.push("first"));
+  const controller = new AbortController();
+  const cancelled = store.updateWhenAvailable(() => calls.push("cancelled"), controller.signal);
+  const last = store.updateWhenAvailable(() => calls.push("last"));
+  controller.abort();
+  await assert.rejects(cancelled, /aborted/);
+  assert.deepEqual(calls, []);
+  fs.unlinkSync(`${path}.lock-recovery`);
+  await Promise.all([first, last]);
+  assert.deepEqual(calls, ["first", "last"]);
+  assert.equal(store.snapshot().sequence, 2);
+});
+test("an expired optional cleanup deadline never starts a transaction", async () => {
+  const { path, store } = fixture("cleanup-expired");
+  let calls = 0;
+  await assert.rejects(
+    store.updateWhenAvailable(() => ++calls, undefined, performance.now() - 1),
+    (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+  );
+  assert.equal(calls, 0);
+  assert.equal(existsSync(path), false);
+  assert.equal(await store.updateWhenAvailable(() => ++calls), 1);
+});
+test("zero-wait override still permits one immediate optional transaction", async () => {
+  const { store } = fixture("cleanup-zero");
+  const previous = process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+  process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = "0";
+  try {
+    assert.equal(await store.updateWhenAvailable(() => 42, undefined, performance.now() - 1), 42);
+  } finally {
+    if (previous === undefined) delete process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+    else process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = previous;
+  }
+});
+test("a queued cleanup deadline expires without blocking its successor", async () => {
+  const { path, store } = fixture("cleanup-queued");
+  writePrivate(`${path}.lock-recovery`, "");
+  const calls: string[] = [];
+  const first = store.updateWhenAvailable(() => calls.push("first"));
+  const expired = store.updateWhenAvailable(
+    () => calls.push("expired"),
+    undefined,
+    performance.now() + 20,
+  );
+  await assert.rejects(
+    expired,
+    (error: unknown) => error instanceof HealthStoreError && error.code === "busy",
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(existsSync(`${path}.lock-recovery`), true);
+  fs.unlinkSync(`${path}.lock-recovery`);
+  await first;
+  await store.updateWhenAvailable(() => calls.push("last"));
+  assert.deepEqual(calls, ["first", "last"]);
+});
+test("cancelling a cross-process retry leaves its gate and queue intact", async () => {
+  const { path, store } = fixture("retry-cancel");
+  writePrivate(`${path}.lock-recovery`, "");
+  const controller = new AbortController();
+  let calls = 0;
+  const pending = store.updateWhenAvailable(() => ++calls, controller.signal);
+  controller.abort();
+  await assert.rejects(pending, /aborted/);
+  assert.equal(calls, 0);
+  assert.equal(existsSync(`${path}.lock-recovery`), true);
+  fs.unlinkSync(`${path}.lock-recovery`);
+  assert.equal(await store.updateWhenAvailable(() => ++calls), 1);
+});
+test("an exhausted lock bound reports a local busy code without mutating state", async () => {
+  const { path, store } = fixture("retry-exhausted");
+  writePrivate(`${path}.lock-recovery`, "");
+  const configured = process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+  process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = "0";
+  let calls = 0;
+  try {
+    await assert.rejects(
+      store.updateWhenAvailable(() => ++calls),
+      (error: unknown) =>
+        error instanceof HealthStoreError &&
+        error.code === "busy" &&
+        error.message.includes("ANTIGRAVITY_HEALTH_BUSY"),
+    );
+    assert.equal(calls, 0);
+    assert.equal(existsSync(path), false);
+    assert.equal(existsSync(`${path}.lock-recovery`), true);
+  } finally {
+    if (configured === undefined) delete process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+    else process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = configured;
+    fs.unlinkSync(`${path}.lock-recovery`);
+  }
+});
+test("a blocked health path does not delay another store", async () => {
+  const first = fixture("independent-a");
+  const second = fixture("independent-b");
+  writePrivate(`${first.path}.lock-recovery`, "");
+  let firstCalls = 0;
+  const blocked = first.store.updateWhenAvailable(() => ++firstCalls);
+  try {
+    assert.equal(await second.store.updateWhenAvailable(() => 42), 42);
+    assert.equal(firstCalls, 0);
+  } finally {
+    fs.unlinkSync(`${first.path}.lock-recovery`);
+  }
+  assert.equal(await blocked, 1);
+});
+test("the queue deadline expires even while an earlier transaction is waiting", async () => {
+  const { path, store } = fixture("queued-timeout");
+  writePrivate(`${path}.lock-recovery`, "");
+  const blocked = store.updateWhenAvailable(() => "owner");
+  const configured = process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+  process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = "0";
+  let calls = 0;
+  try {
+    await assert.rejects(
+      store.updateWhenAvailable(() => ++calls),
+      (error: unknown) =>
+        error instanceof HealthStoreError && error.diagnosticCode === "ANTIGRAVITY_HEALTH_BUSY",
+    );
+    assert.equal(calls, 0);
+  } finally {
+    if (configured === undefined) delete process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS;
+    else process.env.ANTIGRAVITY_HEALTH_LOCK_WAIT_MS = configured;
+    fs.unlinkSync(`${path}.lock-recovery`);
+  }
+  assert.equal(await blocked, "owner");
+});
+test("a failed queued transaction cannot poison subsequent transactions", async () => {
+  const { path, store } = fixture("queued-error");
+  writePrivate(`${path}.lock-recovery`, "");
+  const first = store.updateWhenAvailable(() => {
+    throw new Error("simulated callback failure");
+  });
+  const second = store.updateWhenAvailable((state) => put(state, record("after-error")));
+  fs.unlinkSync(`${path}.lock-recovery`);
+  await assert.rejects(
+    first,
+    (error: unknown) => error instanceof HealthStoreError && error.code === "transaction",
+  );
+  await second;
+  assert.equal(store.snapshot().sequence, 1);
+  assert.equal(Object.keys(store.snapshot().records).length, 1);
+});
 test("no transaction leaves a temporary file or normal acquisition gate", () => {
   assert.equal(
     readdirSync(directory).some((name) => name.endsWith(".tmp")),
