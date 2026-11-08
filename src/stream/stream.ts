@@ -63,6 +63,7 @@ import {
 	type ContentBlock,
 	type CredentialSource,
 	type GeminiContent,
+	type GeminiFunctionCallPart,
 	type GeminiFunctionDeclaration,
 	type GeminiFunctionResponsePart,
 	type GeminiGenerationConfig,
@@ -424,6 +425,82 @@ export function convertMessages(
 				};
 				appendTurn(contents, GeminiRole.User, [part, ...imageParts]);
 			}
+		}
+	}
+
+	// Repair orphaned functionCall/functionResponse pairs. The host's context
+	// compactor or background-task notification injection can break the strict
+	// adjacency required by Claude (every tool_use must have a tool_result in
+	// the immediately-following message). Convert orphans to plain text so the
+	// payload is valid rather than crashing the whole session with a 400.
+	for (let index = 0; index < contents.length; index += 1) {
+		const turn = contents[index];
+		if (turn?.role !== GeminiRole.Model) continue;
+		const callIds = new Map<string, GeminiFunctionCallPart>();
+		for (const part of turn.parts) {
+			if ("functionCall" in part && part.functionCall.id) {
+				callIds.set(part.functionCall.id, part);
+			}
+		}
+		if (callIds.size === 0) continue;
+
+		// Collect response IDs from the immediately-following user turn.
+		const next = contents[index + 1];
+		const responseIds = new Set<string>();
+		if (next?.role === GeminiRole.User) {
+			for (const part of next.parts) {
+				if ("functionResponse" in part && part.functionResponse.id) {
+					responseIds.add(part.functionResponse.id);
+				}
+			}
+		}
+
+		// Replace orphaned functionCall parts with text summaries.
+		let replaced = false;
+		for (const [id, callPart] of callIds) {
+			if (!responseIds.has(id)) {
+				const idx = turn.parts.indexOf(callPart);
+				if (idx !== -1) {
+					const argsText = (() => {
+						try { return JSON.stringify(callPart.functionCall.args ?? {}); }
+						catch { return "{}"; }
+					})();
+					const label = argsText === "{}"
+						? `\`${callPart.functionCall.name}\``
+						: `\`${callPart.functionCall.name}\` (${argsText})`;
+					turn.parts[idx] = { text: sanitizeText(`[Called ${label}]`) };
+					replaced = true;
+				}
+			}
+		}
+
+		// Also strip orphaned functionResponse parts from the next user turn
+		// whose call was just removed.
+		if (replaced && next?.role === GeminiRole.User) {
+			const modelCallIds = new Set<string>();
+			for (const part of turn.parts) {
+				if ("functionCall" in part && part.functionCall.id) {
+					modelCallIds.add(part.functionCall.id);
+				}
+			}
+			next.parts = next.parts.map((part) => {
+				if (
+					"functionResponse" in part &&
+					part.functionResponse.id &&
+					!modelCallIds.has(part.functionResponse.id)
+				) {
+					const resp = part.functionResponse;
+					const output = "error" in resp.response ? resp.response.error : resp.response.output;
+					return { text: sanitizeText(`[Observation from \`${resp.name}\`:\n${output}]`) };
+				}
+				return part;
+			});
+		}
+
+		// If all functionCall parts were replaced, remove empty model turn.
+		if (turn.parts.every((p) => "text" in p && (!p.text || !p.text.trim()))) {
+			contents.splice(index, 1);
+			index -= 1;
 		}
 	}
 
