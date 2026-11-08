@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { AnalyzeFileSchema, executeAnalyzeFile } from "../files/index.js";
+import { PersistentCredentialSource } from "../runtime/persistent-credential-source.js";
 import { loadAntigravitySettings, updateAntigravitySettings } from "../settings.js";
 import {
   DEFAULT_IMAGE_MODEL,
@@ -166,12 +167,12 @@ export function setAllAntigravityToolsEnabled(
 type PreferredImage = { images: GeneratedImage[]; text: string[]; model: string };
 
 /**
- * Preference order for the tool only. `generateAntigravityImages` is the Pi 1.0
- * provider operation and never substitutes models; the file path, the aspect
- * ratio, and the fallback loop live here.
+ * Preference order for the tool only, with account rotation on quota errors.
+ * Uses PersistentCredentialSource so image generation rotates through the full
+ * account pool on 429 / quota exhaustion, matching the chat streaming path.
  */
 async function generateWithPreference(options: {
-  apiKey: string;
+  credentialSource: PersistentCredentialSource;
   prompt: string;
   aspectRatio?: string;
   imageSize?: string;
@@ -179,23 +180,56 @@ async function generateWithPreference(options: {
   model?: string;
   signal?: AbortSignal;
 }): Promise<PreferredImage> {
+  const candidates = imageModelCandidates(options.model);
+  const triedTokens = new Set<string>();
+  const maxRotations = 10;
+  let rotations = 0;
   let lastError = "Antigravity image generation failed.";
-  for (const id of imageModelCandidates(options.model)) {
-    const attempted = await requestAntigravityImage({
-      apiKey: options.apiKey,
-      model: id,
-      prompt: options.prompt,
-      aspectRatio: options.aspectRatio,
-      imageSize: options.imageSize,
-      images: options.images,
-      signal: options.signal,
-    });
-    if (attempted.ok) {
-      return { images: attempted.images, text: attempted.text, model: attempted.model };
+
+  let creds = await options.credentialSource.current();
+  triedTokens.add(creds.token);
+
+  while (true) {
+    for (const id of candidates) {
+      if (options.signal?.aborted) throw new Error("Request was aborted");
+      const apiKey = JSON.stringify({ token: creds.token, projectId: creds.projectId });
+      const attempted = await requestAntigravityImage({
+        apiKey,
+        model: id,
+        prompt: options.prompt,
+        aspectRatio: options.aspectRatio,
+        imageSize: options.imageSize,
+        images: options.images,
+        signal: options.signal,
+      });
+      if (attempted.ok) {
+        await options.credentialSource.succeeded();
+        return { images: attempted.images, text: attempted.text, model: attempted.model };
+      }
+      if (attempted.aborted) throw new Error("Request was aborted");
+      lastError = attempted.message;
     }
-    if (attempted.aborted) throw new Error("Request was aborted");
-    lastError = attempted.message;
+
+    const isQuotaError = /quota|resource.+exhausted|rate.?limit|429/i.test(lastError);
+    if (!isQuotaError || rotations >= maxRotations) break;
+
+    const canRetry = await options.credentialSource.failed({
+      runtimeModel: candidates[0] ?? "gemini-2.0-flash-exp",
+      projectId: creds.projectId ?? "",
+      status: 429,
+      body: lastError,
+    });
+    if (!canRetry) break;
+
+    const next = await options.credentialSource.rotate(triedTokens);
+    if (triedTokens.has(next.token)) break;
+
+    rotations++;
+    triedTokens.add(next.token);
+    creds = next;
   }
+
+  await options.credentialSource.release();
   throw new Error(`Antigravity image generation failed: ${lastError}`);
 }
 
@@ -276,8 +310,13 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
-      if (!apiKey) throw new Error(NO_CREDENTIALS);
+      // Use PersistentCredentialSource for account rotation, same as chat streaming.
+      // Fall back to the host-provided single key only if parseApiKey works.
+      const hostKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
+      if (!hostKey) throw new Error(NO_CREDENTIALS);
+      // Resolve the runtime model for the credential source from the first image candidate.
+      const runtimeModel = imageModelCandidates(params.model)[0] ?? "gemini-2.0-flash-exp";
+      const credentialSource = new PersistentCredentialSource(runtimeModel);
       if (params.path) resolveImageSavePath(ctx.cwd, params.path);
       const images: Array<{ data: string; mimeType: string }> = [];
       if (params.referenceImages?.length) {
@@ -300,7 +339,7 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
       }
       onUpdate?.({ content: [{ type: "text", text: "Generating image…" }], details: {} });
       const result = await generateWithPreference({
-        apiKey,
+        credentialSource,
         prompt: params.prompt,
         aspectRatio: params.aspectRatio,
         imageSize: params.imageSize,
