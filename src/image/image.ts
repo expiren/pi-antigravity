@@ -30,6 +30,9 @@ export const IMAGE_ASPECT_RATIOS = [
 ] as const;
 export type ImageAspectRatio = (typeof IMAGE_ASPECT_RATIOS)[number];
 
+export const IMAGE_SIZE_TIERS = ["1K", "2K", "4K"] as const;
+export type ImageSizeTier = (typeof IMAGE_SIZE_TIERS)[number];
+
 /**
  * Tool-only preference order, seeded from the image catalog so the two lists
  * cannot drift. The provider operation must not substitute models.
@@ -57,7 +60,7 @@ export type ImageGenerateRequest = {
     contents: Array<{ role: "user"; parts: ImageRequestPart[] }>;
     systemInstruction: { role: "user"; parts: Array<{ text: string }> };
     generationConfig: {
-      imageConfig: { aspectRatio: string };
+      imageConfig: { aspectRatio: string; imageSize?: string };
       candidateCount: number;
     };
   };
@@ -134,11 +137,13 @@ function imageRequestBody(
   prompt: string,
   aspectRatio: string,
   images: Array<{ data: string; mimeType: string }>,
+  imageSize?: string,
 ): ImageGenerateRequest["request"] {
-  const parts: ImageRequestPart[] = [{ text: sanitizeText(prompt) }];
+  const parts: ImageRequestPart[] = [];
   for (const image of images) {
     parts.push({ inlineData: inlineImageData(image.data, image.mimeType) });
   }
+  parts.push({ text: sanitizeText(prompt) });
   return {
     contents: [{ role: "user", parts }],
     systemInstruction: {
@@ -146,7 +151,10 @@ function imageRequestBody(
       parts: [{ text: IMAGE_SYSTEM_INSTRUCTION }],
     },
     generationConfig: {
-      imageConfig: { aspectRatio },
+      imageConfig: {
+        aspectRatio,
+        ...(imageSize ? { imageSize } : {}),
+      },
       candidateCount: 1,
     },
   };
@@ -158,12 +166,13 @@ export function buildImageGenerateRequest(
   projectId: string,
   aspectRatio: string,
   images: Array<{ data: string; mimeType: string }> = [],
+  imageSize?: string,
 ): ImageGenerateRequest {
   const envelope = antigravityRequestEnvelope(model, false);
   return {
     project: projectId,
     model,
-    request: imageRequestBody(prompt, aspectRatio, images),
+    request: imageRequestBody(prompt, aspectRatio, images, imageSize),
     requestType: "agent",
     userAgent: "antigravity",
     requestId: envelope.requestId,
@@ -262,6 +271,7 @@ export async function requestAntigravityImage(options: {
   model: string;
   prompt: string;
   aspectRatio?: string;
+  imageSize?: string;
   images?: Array<{ data: string; mimeType: string }>;
   signal?: AbortSignal;
 }): Promise<ImageRequestResult> {
@@ -290,7 +300,7 @@ export async function requestAntigravityImage(options: {
   const streamed = await streamGenerateContent({
     apiKey: options.apiKey,
     model,
-    request: imageRequestBody(prompt, ratio.ratio, options.images ?? []),
+    request: imageRequestBody(prompt, ratio.ratio, options.images ?? [], options.imageSize),
     signal: options.signal,
   });
   if (!streamed.ok) {

@@ -9,6 +9,7 @@ import {
   resolveImageSavePath,
   saveGeneratedImages,
   IMAGE_ASPECT_RATIOS,
+  IMAGE_SIZE_TIERS,
   type GeneratedImage,
 } from "../image/index.js";
 import {
@@ -173,6 +174,8 @@ async function generateWithPreference(options: {
   apiKey: string;
   prompt: string;
   aspectRatio?: string;
+  imageSize?: string;
+  images?: Array<{ data: string; mimeType: string }>;
   model?: string;
   signal?: AbortSignal;
 }): Promise<PreferredImage> {
@@ -183,6 +186,8 @@ async function generateWithPreference(options: {
       model: id,
       prompt: options.prompt,
       aspectRatio: options.aspectRatio,
+      imageSize: options.imageSize,
+      images: options.images,
       signal: options.signal,
     });
     if (attempted.ok) {
@@ -247,6 +252,18 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
     parameters: Type.Object({
       prompt: Type.String({ description: "Image description." }),
       aspectRatio: Type.Optional(StringEnum(IMAGE_ASPECT_RATIOS)),
+      imageSize: Type.Optional(
+        StringEnum(IMAGE_SIZE_TIERS, {
+          description:
+            "Output resolution tier ('1K', '2K', '4K'). Use '4K' for ultra-high resolution.",
+        }),
+      ),
+      referenceImages: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Local file paths to reference images (PNG, JPEG, WEBP) for image editing or conditioning.",
+        }),
+      ),
       model: Type.Optional(
         Type.String({
           description: `Image model id. Default: ${DEFAULT_IMAGE_MODEL}.`,
@@ -262,11 +279,32 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
       const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
       if (!apiKey) throw new Error(NO_CREDENTIALS);
       if (params.path) resolveImageSavePath(ctx.cwd, params.path);
+      const images: Array<{ data: string; mimeType: string }> = [];
+      if (params.referenceImages?.length) {
+        const fs = await import("node:fs");
+        const nodePath = await import("node:path");
+        const MIME: Record<string, string> = {
+          ".png": "image/png",
+          ".jpg": "image/jpeg",
+          ".jpeg": "image/jpeg",
+          ".webp": "image/webp",
+        };
+        for (const ref of params.referenceImages) {
+          const abs = nodePath.resolve(ctx.cwd, ref);
+          const ext = nodePath.extname(abs).toLowerCase();
+          const mimeType = MIME[ext];
+          if (!mimeType) throw new Error(`Unsupported reference image format: ${ext}`);
+          const data = fs.readFileSync(abs).toString("base64");
+          images.push({ data, mimeType });
+        }
+      }
       onUpdate?.({ content: [{ type: "text", text: "Generating image…" }], details: {} });
       const result = await generateWithPreference({
         apiKey,
         prompt: params.prompt,
         aspectRatio: params.aspectRatio,
+        imageSize: params.imageSize,
+        images: images.length ? images : undefined,
         model: params.model,
         signal,
       });

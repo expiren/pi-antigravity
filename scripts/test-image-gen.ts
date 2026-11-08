@@ -8,6 +8,7 @@ import {
   buildImageGenerateRequest,
   generateAntigravityImages,
   imageModelCandidates,
+  IMAGE_SIZE_TIERS,
   inlineImageData,
   requestAntigravityImage,
   resolveImageSavePath,
@@ -79,13 +80,13 @@ async function main() {
   assert(req.model === "gemini-3-pro-image", "request model");
   assert(req.project === "proj-1", "request project");
   assert(req.request.generationConfig.imageConfig.aspectRatio === "16:9", "aspect ratio");
-  assert(req.request.contents[0]?.parts[0]?.text === "a lighthouse", "prompt text");
+  assert(req.request.contents[0]?.parts[0]?.text === "a lighthouse", "prompt text is sole part when no images");
   assert(/^agent\//.test(req.requestId), "agent request id");
 
   const withImage = buildImageGenerateRequest("edit this", "gemini-3-pro-image", "proj-1", "1:1", [
     { data: "data:image/jpeg;base64,/9j/4AAQ", mimeType: "image/png" },
   ]);
-  const inlinePart = withImage.request.contents[0]?.parts[1];
+  const inlinePart = withImage.request.contents[0]?.parts[0];
   assert(
     inlinePart && "inlineData" in inlinePart && inlinePart.inlineData.mimeType === "image/jpeg",
     "inline image input keeps its own mime type",
@@ -250,6 +251,60 @@ async function main() {
       "rejects ratio",
     );
     assert(!fetched, "invalid ratio does not hit the network");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // ── imageSize support ──
+  assert(IMAGE_SIZE_TIERS.includes("4K"), "IMAGE_SIZE_TIERS includes 4K");
+  assert(IMAGE_SIZE_TIERS.includes("1K"), "IMAGE_SIZE_TIERS includes 1K");
+  assert(IMAGE_SIZE_TIERS.length === 3, "exactly three size tiers");
+
+  const req4k = buildImageGenerateRequest("hi-res photo", "gemini-3-pro-image", "proj-1", "16:9", [], "4K");
+  assert(
+    req4k.request.generationConfig.imageConfig.imageSize === "4K",
+    "imageSize 4K is set in generationConfig.imageConfig",
+  );
+  assert(
+    req4k.request.generationConfig.imageConfig.aspectRatio === "16:9",
+    "aspectRatio preserved alongside imageSize",
+  );
+
+  const reqNoSize = buildImageGenerateRequest("a cat", "gemini-3-pro-image", "proj-1", "1:1");
+  assert(
+    !("imageSize" in reqNoSize.request.generationConfig.imageConfig),
+    "imageSize omitted when not provided",
+  );
+
+  // ── Reference images: parts ordering ──
+  const refImages = [
+    { data: "AAAA", mimeType: "image/png" },
+    { data: "BBBB", mimeType: "image/jpeg" },
+  ];
+  const withRefs = buildImageGenerateRequest("edit", "gemini-3-pro-image", "proj-1", "1:1", refImages, "2K");
+  const refParts = withRefs.request.contents[0]!.parts;
+  assert(refParts.length === 3, "two ref images + one text = 3 parts");
+  assert("inlineData" in refParts[0]! && refParts[0]!.inlineData.mimeType === "image/png", "first ref is PNG");
+  assert("inlineData" in refParts[1]! && refParts[1]!.inlineData.data === "BBBB", "second ref data");
+  assert("text" in refParts[2]! && refParts[2]!.text === "edit", "text prompt is last part");
+  assert(withRefs.request.generationConfig.imageConfig.imageSize === "2K", "imageSize 2K in ref request");
+
+  // ── requestAntigravityImage passes imageSize through ──
+  try {
+    let capturedBody: string | undefined;
+    globalThis.fetch = async (_input, init) => {
+      capturedBody = String(init?.body);
+      return new Response(imageSse(png) + "data: [DONE]\n", { status: 200 });
+    };
+    const sizeResult = await requestAntigravityImage({
+      apiKey,
+      model: "gemini-3-pro-image",
+      prompt: "4k test",
+      aspectRatio: "1:1",
+      imageSize: "4K",
+    });
+    assert(sizeResult.ok, "requestAntigravityImage with imageSize succeeds");
+    assert(capturedBody && capturedBody.includes('"imageSize":"4K"'), "imageSize appears in fetch body");
   } finally {
     globalThis.fetch = originalFetch;
   }
