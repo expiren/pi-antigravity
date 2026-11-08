@@ -1,6 +1,6 @@
 # pi-antigravity
 
-[![npm version](https://img.shields.io/npm/v/@gwylook/pi-antigravity.svg)](https://www.npmjs.com/package/@gwylook/pi-antigravity)
+[![npm version](https://img.shields.io/npm/v/@expiren/pi-antigravity.svg)](https://www.npmjs.com/package/@expiren/pi-antigravity)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **pi-antigravity** is an enhanced [Pi Coding Agent](https://pi.dev) provider for Google Antigravity / Cloud Code Assist models (Gemini, Claude, and GPT-OSS) featuring native Google Grounding search tools, seamless multi-account auto-failover, and direct OAuth authentication.
@@ -33,24 +33,24 @@
 Install the package via npm (recommended):
 
 ```bash
-pi install npm:@gwylook/pi-antigravity
+pi install npm:@expiren/pi-antigravity
 ```
 
 To install or lock to a specific version (e.g. matching Pi 1.0.x):
 
 ```bash
-pi install npm:@gwylook/pi-antigravity@^1.0.0
+pi install npm:@expiren/pi-antigravity@^1.0.0
 ```
 
 Restart Pi (or run `/reload`) after installation. To update later:
 
 ```bash
-pi update npm:@gwylook/pi-antigravity
+pi update npm:@expiren/pi-antigravity
 ```
 
 ### Upgrading to 1.0
 
-1.0 requires Pi **1.0.0 or later**. If you are still on Pi 0.87, stay on `@gwylook/pi-antigravity@^0.87.0` — the peer dependency floor makes 1.0 unresolvable on older Pi.
+1.0 requires Pi **1.0.0 or later**. If you are still on Pi 0.87, stay on `@expiren/pi-antigravity@^0.87.0` — the peer dependency floor makes 1.0 unresolvable on older Pi.
 
 The extension API also changed in one place:
 
