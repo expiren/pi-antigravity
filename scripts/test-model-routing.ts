@@ -2007,6 +2007,80 @@ try {
 assert.equal(tailThrew, false, "orphaned tail tool_use must not throw");
 console.log("PASS orphaned tool_use: tail position no longer throws");
 
+// — Orphaned tool_use: errored/aborted assistant skipped but its toolResults survive —
+// This reproduces the exact bug: host sends an assistant turn with tool calls
+// that has stopReason "error", followed by the toolResult messages. The assistant
+// turn is skipped (line 327-328), but the toolResults become functionResponse
+// parts with no matching functionCall.
+const erroredAssistantContext = {
+  messages: [
+    { role: "user", content: "generate images", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "I'll generate them" },
+        { type: "toolCall", id: "toolu_err_01", name: "generate_image", arguments: { prompt: "cat" } },
+        { type: "toolCall", id: "toolu_err_02", name: "generate_image", arguments: { prompt: "dog" } },
+        { type: "toolCall", id: "toolu_err_03", name: "task_output", arguments: { task_id: "st_1" } },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-opus-4-6",
+      usage: zeroUsage,
+      stopReason: "error",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "toolu_err_01",
+      toolName: "generate_image",
+      isError: false,
+      content: [{ type: "text", text: "image saved" }],
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "toolu_err_02",
+      toolName: "generate_image",
+      isError: true,
+      content: [{ type: "text", text: "quota exhausted" }],
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "toolu_err_03",
+      toolName: "task_output",
+      isError: false,
+      content: [{ type: "text", text: "running" }],
+      timestamp: Date.now(),
+    },
+    { role: "user", content: "continue", timestamp: Date.now() },
+  ],
+} as unknown as Context;
+const convertedErrored = convertMessages(claudeOpusModel, erroredAssistantContext, "claude-opus-4-6-thinking");
+// The errored assistant turn is skipped entirely. Its 3 toolResult messages
+// must NOT become functionResponse parts (which would crash Claude with 400).
+// They should be converted to text observations.
+for (const turn of convertedErrored) {
+  for (const part of turn.parts) {
+    assert.ok(
+      !("functionResponse" in part),
+      "errored assistant's toolResults must not become functionResponse parts",
+    );
+    assert.ok(
+      !("functionCall" in part),
+      "errored assistant's toolCalls must not become functionCall parts",
+    );
+  }
+}
+// All content merges into one user turn via appendTurn (same role coalescing).
+// The key invariant: no functionCall or functionResponse parts exist.
+assert.ok(convertedErrored.length >= 1, "must produce at least one turn");
+// Verify the observations appear as text
+const allText = convertedErrored.flatMap((t) => t.parts.filter((p): p is { text: string } => "text" in p).map((p) => p.text));
+assert.ok(allText.some((t) => t.includes("[Observation from")), "observations must appear as text");
+console.log("PASS orphaned tool_use: errored assistant with toolResults converted to text");
+
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,
 );
