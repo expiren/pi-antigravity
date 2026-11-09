@@ -170,6 +170,9 @@ type PreferredImage = { images: GeneratedImage[]; text: string[]; model: string 
  * Preference order for the tool only, with account rotation on quota errors.
  * Uses PersistentCredentialSource so image generation rotates through the full
  * account pool on 429 / quota exhaustion, matching the chat streaming path.
+ *
+ * Each model candidate is attempted up to MAX_RETRIES_PER_ATTEMPT times for
+ * transient (non-quota) failures before moving to the next candidate or account.
  */
 async function generateWithPreference(options: {
   credentialSource: PersistentCredentialSource;
@@ -183,6 +186,8 @@ async function generateWithPreference(options: {
   const candidates = imageModelCandidates(options.model);
   const triedTokens = new Set<string>();
   const maxRotations = 10;
+  const maxRetriesPerAttempt = 3;
+  const retryDelayMs = 2000;
   let rotations = 0;
   let lastError = "Antigravity image generation failed.";
 
@@ -192,22 +197,36 @@ async function generateWithPreference(options: {
   while (true) {
     for (const id of candidates) {
       if (options.signal?.aborted) throw new Error("Request was aborted");
-      const apiKey = JSON.stringify({ token: creds.token, projectId: creds.projectId });
-      const attempted = await requestAntigravityImage({
-        apiKey,
-        model: id,
-        prompt: options.prompt,
-        aspectRatio: options.aspectRatio,
-        imageSize: options.imageSize,
-        images: options.images,
-        signal: options.signal,
-      });
-      if (attempted.ok) {
-        await options.credentialSource.succeeded();
-        return { images: attempted.images, text: attempted.text, model: attempted.model };
+
+      // Retry each candidate up to maxRetriesPerAttempt times for transient errors.
+      for (let retry = 0; retry < maxRetriesPerAttempt; retry++) {
+        if (retry > 0 && options.signal?.aborted) throw new Error("Request was aborted");
+        const apiKey = JSON.stringify({ token: creds.token, projectId: creds.projectId });
+        const attempted = await requestAntigravityImage({
+          apiKey,
+          model: id,
+          prompt: options.prompt,
+          aspectRatio: options.aspectRatio,
+          imageSize: options.imageSize,
+          images: options.images,
+          signal: options.signal,
+        });
+        if (attempted.ok) {
+          await options.credentialSource.succeeded();
+          return { images: attempted.images, text: attempted.text, model: attempted.model };
+        }
+        if (attempted.aborted) throw new Error("Request was aborted");
+        lastError = attempted.message;
+
+        // Quota errors break out of the retry loop to rotate accounts instead.
+        const isQuota = /quota|resource.+exhausted|rate.?limit|429/i.test(lastError);
+        if (isQuota) break;
+
+        // Non-quota transient error: wait before retrying the same model+account.
+        if (retry < maxRetriesPerAttempt - 1) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (retry + 1)));
+        }
       }
-      if (attempted.aborted) throw new Error("Request was aborted");
-      lastError = attempted.message;
     }
 
     const isQuotaError = /quota|resource.+exhausted|rate.?limit|429/i.test(lastError);
