@@ -334,27 +334,56 @@ export class HealthStore {
   private acquire(now: number): () => void {
     const lock = `${this.path}.lock`;
     const gate = `${this.path}.lock-recovery`;
-    let gateFd: number;
-    const maxAttempts = 6;
-    const retryMs = 250;
-    for (let attempt = 0; ; attempt++) {
-      try {
-        gateFd = createPrivateFile(gate);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-          if (attempt >= maxAttempts - 1) {
-            throw new HealthStoreError(
-              "busy",
-              "Health lock acquisition or recovery is busy. If it persists, stop all store users before removing the orphan .lock-recovery file.",
-            );
+    const maxAttempts = 10;
+    const retryMs = 150;
+    const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+    const sleep = (ms: number): void => {
+      Atomics.wait(waitBuffer, 0, 0, ms);
+    };
+
+    const unlinkWithRetry = (target: string): void => {
+      for (let i = 0; i < 4; i++) {
+        try {
+          unlinkSync(target);
+          return;
+        } catch (error) {
+          if (isMissing(error)) return;
+          const code = (error as NodeJS.ErrnoException).code;
+          if ((code === "EPERM" || code === "EACCES" || code === "EBUSY") && i < 3) {
+            sleep(25 * (i + 1));
+            continue;
           }
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryMs * (attempt + 1));
-          continue;
+          throw error;
         }
-        throw error;
       }
-    }
+    };
+
+    const tryReclaimDeadGate = (currentNow: number): boolean => {
+      try {
+        const gateOwner = readOwner(gate);
+        if (!alive(gateOwner.pid)) {
+          unlinkWithRetry(gate);
+          return true;
+        }
+        return false;
+      } catch (error) {
+        if (isMissing(error)) return true;
+        // If the process crashed after createPrivateFile(gate) but before writing owner JSON,
+        // only reclaim after LOCK_MS has elapsed so an active writer isn't interrupted.
+        try {
+          const stat = fs.lstatSync(gate);
+          if (currentNow - stat.mtimeMs > LOCK_MS) {
+            unlinkWithRetry(gate);
+            return true;
+          }
+        } catch (statError) {
+          if (isMissing(statError)) return true;
+        }
+        return false;
+      }
+    };
+
     const owner: LockOwner = {
       version: 1,
       pid: process.pid,
@@ -362,34 +391,93 @@ export class HealthStore {
       createdAt: now,
       expiresAt: now + LOCK_MS,
     };
-    let created = false;
-    try {
-      // Every acquisition/recovery uses this gate. Without it, two stale-lock
-      // observers can unlink a newly acquired lock between an identity check and unlink.
+
+    for (let attempt = 0; ; attempt++) {
+      let gateFd: number | undefined;
       try {
-        const previous = readOwner(lock);
-        if (alive(previous.pid)) busy(); // Expiry never authorizes stealing from a live owner.
-        unlinkSync(lock);
+        gateFd = createPrivateFile(gate);
       } catch (error) {
-        if (!isMissing(error)) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EEXIST" || code === "EPERM" || code === "EACCES") {
+          if (code === "EEXIST" && tryReclaimDeadGate(this.now())) {
+            continue;
+          }
+          if (attempt >= maxAttempts - 1) {
+            throw new HealthStoreError(
+              "busy",
+              "Health lock acquisition or recovery is busy. If it persists, stop all store users before removing the orphan .lock-recovery file.",
+            );
+          }
+          sleep(retryMs * (attempt + 1));
+          continue;
+        }
+        throw error;
       }
-      const fd = createPrivateFile(lock);
-      created = true;
+
+      let created = false;
+      let lockBusyWithLiveOwner = false;
       try {
-        writeFileSync(fd, JSON.stringify(owner), "utf8");
-        fs.fsyncSync(fd);
+        // Record our PID in the gate so if this process is hard-killed before finally,
+        // future callers can verify !alive(pid) and safely reclaim the orphan gate.
+        try {
+          writeFileSync(gateFd, JSON.stringify(owner), "utf8");
+        } finally {
+          closeSync(gateFd);
+          gateFd = undefined;
+        }
+
+        // Every acquisition/recovery uses this gate. Without it, two stale-lock
+        // observers can unlink a newly acquired lock between an identity check and unlink.
+        try {
+          const previous = readOwner(lock);
+          if (alive(previous.pid)) {
+            lockBusyWithLiveOwner = true;
+          } else {
+            unlinkWithRetry(lock);
+          }
+        } catch (error) {
+          if (!isMissing(error)) throw error;
+        }
+
+        if (!lockBusyWithLiveOwner) {
+          const fd = createPrivateFile(lock);
+          created = true;
+          try {
+            writeFileSync(fd, JSON.stringify(owner), "utf8");
+            fs.fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
+          break;
+        }
+      } catch (error) {
+        if (created) {
+          try {
+            unlinkWithRetry(lock);
+          } catch {
+            // Preserve primary error.
+          }
+        }
+        throw error;
       } finally {
-        closeSync(fd);
+        if (gateFd !== undefined) {
+          try {
+            closeSync(gateFd);
+          } catch {
+            // Ignore close error on cleanup.
+          }
+        }
+        unlinkWithRetry(gate);
       }
-    } catch (error) {
-      if (created) unlinkSync(lock);
-      throw error;
-    } finally {
-      closeSync(gateFd);
-      // Never automatically reclaim the recovery gate: a crashed reaper is
-      // ambiguous without filesystem compare-and-swap. Fail closed with guidance.
-      unlinkSync(gate);
+
+      // .lock is currently held by a live process; gate has been released above,
+      // so wait and retry rather than failing immediately on the first contention.
+      if (attempt >= maxAttempts - 1) {
+        busy();
+      }
+      sleep(retryMs * (attempt + 1));
     }
+
     return () => {
       try {
         const current = readOwner(lock);
@@ -399,7 +487,7 @@ export class HealthStore {
             "Health lock ownership changed; stop competing writers.",
           );
         }
-        unlinkSync(lock);
+        unlinkWithRetry(lock);
       } catch (error) {
         throw safeError(error);
       }
