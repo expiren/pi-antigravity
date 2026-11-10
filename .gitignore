@@ -10,3 +10,7 @@ scripts/smoke-all-models-results.json
 *.tgz
 *.m4a
 .index/
+
+# OmO session state and Pi generated artifacts
+.omo/
+.pi/
