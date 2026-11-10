@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+
+## [1.0.6] - 2026-11-10
+
+### Fixed
+
+- **Cross-session health lock race condition:** When multiple projects run concurrently on Windows, `readOwner` retries up to 4 times (25ms–75ms) on non-`ENOENT` errors to resolve transient `STATUS_DELETE_PENDING` (`EPERM`/`EACCES`) windows during concurrent `unlinkSync(lock)`.
+- **Stale 0-byte `.lock` recovery:** In `acquire()`, unreadable or 0-byte `.lock` files older than `LOCK_MS` (30s) left behind by killed processes are safely reclaimed inside the `.lock-recovery` gate instead of permanently bricking store access across all projects.
 ## [Unreleased]
 
 ### Added

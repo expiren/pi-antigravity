@@ -1,6 +1,6 @@
 {
   "name": "@expiren/pi-antigravity",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Antigravity / Cloud Code Assist provider for Pi Coding Agent 1.0 — chat, file attachments, file analysis, web search, url context, and image models",
   "author": "Rahul Arya",
   "license": "MIT",
