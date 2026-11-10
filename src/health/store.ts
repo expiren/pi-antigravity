@@ -335,16 +335,25 @@ export class HealthStore {
     const lock = `${this.path}.lock`;
     const gate = `${this.path}.lock-recovery`;
     let gateFd: number;
-    try {
-      gateFd = createPrivateFile(gate);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new HealthStoreError(
-          "busy",
-          "Health lock acquisition or recovery is busy. If it persists, stop all store users before removing the orphan .lock-recovery file.",
-        );
+    const maxAttempts = 6;
+    const retryMs = 250;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        gateFd = createPrivateFile(gate);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          if (attempt >= maxAttempts - 1) {
+            throw new HealthStoreError(
+              "busy",
+              "Health lock acquisition or recovery is busy. If it persists, stop all store users before removing the orphan .lock-recovery file.",
+            );
+          }
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryMs * (attempt + 1));
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
     const owner: LockOwner = {
       version: 1,
