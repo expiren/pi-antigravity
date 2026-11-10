@@ -604,6 +604,16 @@ test("ambiguous partial lock is never treated as healthy or stolen", () => {
   rejected(() => store.update(() => undefined), "unsafe");
   assert.equal(existsSync(path), false);
 });
+test("expired corrupt or 0-byte lock is safely reclaimed after LOCK_MS", () => {
+  const { path } = fixture("expired-corrupt-lock");
+  writePrivate(`${path}.lock`, "");
+  const advanced = new HealthStore(path, { now: () => Date.now() + 60_000 });
+  advanced.update((state) => {
+    put(state, record("recovered-from-0byte"));
+  });
+  assert.equal(existsSync(path), true);
+  assert.equal(existsSync(`${path}.lock`), false);
+});
 test("concurrent writers observe explicit busy then preserve both committed updates", async () => {
   const { path, store } = fixture("parallel");
   const holder = worker("hold", path, "parallel-a");

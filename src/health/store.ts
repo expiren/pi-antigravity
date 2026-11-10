@@ -171,18 +171,33 @@ interface LockOwner {
   expiresAt: number;
 }
 
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+function sleepMs(ms: number): void {
+  Atomics.wait(sleepBuffer, 0, 0, ms);
+}
+
 function readOwner(path: string): LockOwner {
-  let value: Record<string, unknown>;
-  try {
-    value = object(JSON.parse(readPrivateFile(path, 1024)));
-  } catch (error) {
-    if (isMissing(error)) throw error;
-    throw new HealthStoreError(
-      "unsafe",
-      "Health lock owner is unreadable. Stop all users of this store before removing orphan lock files.",
-    );
+  let value: Record<string, unknown> | undefined;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      value = object(JSON.parse(readPrivateFile(path, 1024)));
+      break;
+    } catch (error) {
+      if (isMissing(error)) throw error;
+      // On Windows, a concurrent unlinkSync(lock) in release() or an in-flight writeFileSync
+      // can transiently yield EPERM/EACCES/EBUSY or empty text for a few milliseconds.
+      if (attempt < 3) {
+        sleepMs(25 * (attempt + 1));
+        continue;
+      }
+      throw new HealthStoreError(
+        "unsafe",
+        "Health lock owner is unreadable. Stop all users of this store before removing orphan lock files.",
+      );
+    }
   }
   if (
+    !value ||
     value.version !== 1 ||
     !Number.isInteger(value.pid) ||
     Number(value.pid) <= 0 ||
@@ -336,11 +351,7 @@ export class HealthStore {
     const gate = `${this.path}.lock-recovery`;
     const maxAttempts = 10;
     const retryMs = 150;
-    const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
-
-    const sleep = (ms: number): void => {
-      Atomics.wait(waitBuffer, 0, 0, ms);
-    };
+    const sleep = sleepMs;
 
     const unlinkWithRetry = (target: string): void => {
       for (let i = 0; i < 4; i++) {
@@ -436,7 +447,21 @@ export class HealthStore {
             unlinkWithRetry(lock);
           }
         } catch (error) {
-          if (!isMissing(error)) throw error;
+          if (!isMissing(error)) {
+            // If a process crashed after createPrivateFile(lock) before writing JSON,
+            // reclaim the corrupt/0-byte .lock file once it is older than LOCK_MS.
+            let reclaimedCorruptLock = false;
+            try {
+              const stat = fs.lstatSync(lock);
+              if (this.now() - stat.mtimeMs > LOCK_MS) {
+                unlinkWithRetry(lock);
+                reclaimedCorruptLock = true;
+              }
+            } catch (statError) {
+              if (isMissing(statError)) reclaimedCorruptLock = true;
+            }
+            if (!reclaimedCorruptLock) throw error;
+          }
         }
 
         if (!lockBusyWithLiveOwner) {
