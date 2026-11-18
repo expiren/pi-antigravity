@@ -453,29 +453,57 @@ export function convertMessages(
 	for (let index = 0; index < contents.length; index += 1) {
 		const turn = contents[index];
 		if (turn?.role !== GeminiRole.Model) continue;
-		const callIds = new Map<string, GeminiFunctionCallPart>();
+
+		// Collect ALL functionCall parts — with or without an id. The Antigravity
+		// backend auto-assigns tool_use IDs to id-less calls before forwarding to
+		// Claude, so an id-less call with no matching response is still orphaned.
+		const callParts: GeminiFunctionCallPart[] = [];
+		const callById = new Map<string, GeminiFunctionCallPart>();
 		for (const part of turn.parts) {
-			if ("functionCall" in part && part.functionCall.id) {
-				callIds.set(part.functionCall.id, part);
+			if ("functionCall" in part) {
+				callParts.push(part);
+				if (part.functionCall.id) {
+					callById.set(part.functionCall.id, part);
+				}
 			}
 		}
-		if (callIds.size === 0) continue;
+		if (callParts.length === 0) continue;
 
 		// Collect response IDs from the immediately-following user turn.
 		const next = contents[index + 1];
 		const responseIds = new Set<string>();
+		const responseNames = new Map<string, number>();
 		if (next?.role === GeminiRole.User) {
 			for (const part of next.parts) {
-				if ("functionResponse" in part && part.functionResponse.id) {
-					responseIds.add(part.functionResponse.id);
+				if ("functionResponse" in part) {
+					if (part.functionResponse.id) {
+						responseIds.add(part.functionResponse.id);
+					}
+					// Count name-based matches for id-less calls.
+					const name = part.functionResponse.name;
+					responseNames.set(name, (responseNames.get(name) ?? 0) + 1);
 				}
 			}
 		}
 
 		// Replace orphaned functionCall parts with text summaries.
 		let replaced = false;
-		for (const [id, callPart] of callIds) {
-			if (!responseIds.has(id)) {
+		for (const callPart of callParts) {
+			const id = callPart.functionCall.id;
+			let isOrphaned: boolean;
+			if (id) {
+				isOrphaned = !responseIds.has(id);
+			} else {
+				// Id-less call: match by name count — consume one response per call.
+				const remaining = responseNames.get(callPart.functionCall.name) ?? 0;
+				if (remaining > 0) {
+					responseNames.set(callPart.functionCall.name, remaining - 1);
+					isOrphaned = false;
+				} else {
+					isOrphaned = true;
+				}
+			}
+			if (isOrphaned) {
 				const idx = turn.parts.indexOf(callPart);
 				if (idx !== -1) {
 					const argsText = (() => {
@@ -494,21 +522,31 @@ export function convertMessages(
 		// Also strip orphaned functionResponse parts from the next user turn
 		// whose call was just removed.
 		if (replaced && next?.role === GeminiRole.User) {
-			const modelCallIds = new Set<string>();
+			const survivingCallIds = new Set<string>();
+			const survivingCallNames = new Map<string, number>();
 			for (const part of turn.parts) {
-				if ("functionCall" in part && part.functionCall.id) {
-					modelCallIds.add(part.functionCall.id);
+				if ("functionCall" in part) {
+					if (part.functionCall.id) survivingCallIds.add(part.functionCall.id);
+					const name = part.functionCall.name;
+					survivingCallNames.set(name, (survivingCallNames.get(name) ?? 0) + 1);
 				}
 			}
 			next.parts = next.parts.map((part) => {
-				if (
-					"functionResponse" in part &&
-					part.functionResponse.id &&
-					!modelCallIds.has(part.functionResponse.id)
-				) {
+				if ("functionResponse" in part) {
 					const resp = part.functionResponse;
-					const output = "error" in resp.response ? resp.response.error : resp.response.output;
-					return { text: sanitizeText(`[Observation from \`${resp.name}\`:\n${output}]`) };
+					if (resp.id && !survivingCallIds.has(resp.id)) {
+						const output = "error" in resp.response ? resp.response.error : resp.response.output;
+						return { text: sanitizeText(`[Observation from \`${resp.name}\`:\n${output}]`) };
+					}
+					if (!resp.id) {
+						const remaining = survivingCallNames.get(resp.name) ?? 0;
+						if (remaining > 0) {
+							survivingCallNames.set(resp.name, remaining - 1);
+						} else {
+							const output = "error" in resp.response ? resp.response.error : resp.response.output;
+							return { text: sanitizeText(`[Observation from \`${resp.name}\`:\n${output}]`) };
+						}
+					}
 				}
 				return part;
 			});
@@ -520,6 +558,7 @@ export function convertMessages(
 			index -= 1;
 		}
 	}
+
 
 	// A function-call model turn is only valid immediately after a user turn
 	// (including a function-response turn). Compacted history can drop that
