@@ -374,11 +374,6 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
             type: "text" as const,
             text: `Saved image to ${savedPaths.join(", ")}${notes ? `. ${notes}` : ""}`,
           },
-          ...result.images.map((image) => ({
-            type: "image" as const,
-            data: image.data,
-            mimeType: image.mimeType,
-          })),
         ],
         details: { model: result.model, savedPaths },
       };
