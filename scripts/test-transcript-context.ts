@@ -269,4 +269,74 @@ assert.ok(!JSON.stringify(claudeParts).includes("unsigned internal thought"));
 assert.ok(JSON.stringify(claudeParts).includes("signed internal thought"));
 assert.ok(JSON.stringify(claudeParts).includes("The answer is 42."));
 
+// Regression: parallel image toolResult messages must not interleave
+// inlineData between functionResponse parts (causes Antigravity proxy
+// to split the tool_result group and trigger Claude HTTP 400).
+const imageClaudeModel = { ...testModel, id: "claude-opus-4-6" };
+const parallelImageContext = {
+  messages: [
+    { role: "user", content: "read these images", timestamp: 0 },
+    {
+      role: "assistant",
+      provider: "antigravity",
+      model: imageClaudeModel.id,
+      stopReason: "stop",
+      timestamp: 1,
+      content: [
+        { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.png" } },
+        { type: "toolCall", id: "call_2", name: "read", arguments: { path: "b.png" } },
+        { type: "toolCall", id: "call_3", name: "read", arguments: { path: "c.png" } },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_1",
+      toolName: "read",
+      timestamp: 2,
+      content: [
+        { type: "text", text: "a.png" },
+        { type: "image", data: "iVBOR1==", mimeType: "image/png" },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_2",
+      toolName: "read",
+      timestamp: 3,
+      content: [
+        { type: "text", text: "b.png" },
+        { type: "image", data: "iVBOR2==", mimeType: "image/png" },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_3",
+      toolName: "read",
+      timestamp: 4,
+      content: [
+        { type: "text", text: "c.png" },
+        { type: "image", data: "iVBOR3==", mimeType: "image/png" },
+      ],
+    },
+    { role: "user", content: "describe them", timestamp: 5 },
+  ],
+} as unknown as Context;
+const imageContents = convertMessages(imageClaudeModel, parallelImageContext, imageClaudeModel.id);
+// Find the user turn that carries the functionResponse parts.
+const frTurn = imageContents.find(
+  (t) => t.role === "user" && t.parts.some((p) => "functionResponse" in p),
+);
+assert.ok(frTurn, "functionResponse user turn must exist");
+// All functionResponse parts must be contiguous at the front.
+let seenNonFR = false;
+for (const part of frTurn!.parts) {
+  if ("functionResponse" in part) {
+    assert.ok(!seenNonFR, "functionResponse must not appear after a non-functionResponse part");
+  } else {
+    seenNonFR = true;
+  }
+}
+// All three responses must still be present.
+const frCount = frTurn!.parts.filter((p) => "functionResponse" in p).length;
+assert.equal(frCount, 3, "all three functionResponse parts must survive");
 console.log("scripts/test-transcript-context.ts: all TranscriptContext tests passed");

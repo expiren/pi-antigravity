@@ -1995,17 +1995,17 @@ const orphanedTailContext = {
   ],
 } as unknown as Context;
 
-// Before the fix this would throw "missing tool result(s) for the final assistant tool call".
-// After the fix the orphaned call is downgraded to text, and the tail check appends a
-// continuation text instead of throwing.
+// A transcript ending on an unresolved assistant functionCall (no following
+// toolResult) must reach the explicit guard at lines 604-610 and throw,
+// rather than silently downgrading to text, so the host can surface the error.
 let tailThrew = false;
 try {
   convertMessages(model, orphanedTailContext, "claude-opus-4-6");
 } catch {
   tailThrew = true;
 }
-assert.equal(tailThrew, false, "orphaned tail tool_use must not throw");
-console.log("PASS orphaned tool_use: tail position no longer throws");
+assert.equal(tailThrew, true, "orphaned tail tool_use must throw");
+console.log("PASS orphaned tool_use: tail position throws as expected");
 
 // — Orphaned tool_use: errored/aborted assistant skipped but its toolResults survive —
 // This reproduces the exact bug: host sends an assistant turn with tool calls

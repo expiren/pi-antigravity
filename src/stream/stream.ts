@@ -450,7 +450,7 @@ export function convertMessages(
 	// adjacency required by Claude (every tool_use must have a tool_result in
 	// the immediately-following message). Convert orphans to plain text so the
 	// payload is valid rather than crashing the whole session with a 400.
-	for (let index = 0; index < contents.length; index += 1) {
+	for (let index = 0; index < contents.length - 1; index += 1) {
 		const turn = contents[index];
 		if (turn?.role !== GeminiRole.Model) continue;
 
@@ -609,6 +609,26 @@ export function convertMessages(
 			);
 		}
 		appendTurn(contents, GeminiRole.User, [{ text: CONTINUATION_TEXT }]);
+	}
+
+	// Keep all functionResponse parts contiguously at the front of any user turn.
+	// Interleaved inlineData (from parallel image toolResults) or text (from
+	// dropped/orphaned tool results) causes Antigravity's Gemini->Claude
+	// translator to split tool_result blocks and fail with HTTP 400.
+	for (const turn of contents) {
+		if (turn.role !== GeminiRole.User) continue;
+		if (!turn.parts.some((part) => "functionResponse" in part)) continue;
+
+		const responseParts: GeminiPart[] = [];
+		const trailingParts: GeminiPart[] = [];
+		for (const part of turn.parts) {
+			if ("functionResponse" in part) {
+				responseParts.push(part);
+			} else {
+				trailingParts.push(part);
+			}
+		}
+		turn.parts = [...responseParts, ...trailingParts];
 	}
 
 	return contents;
