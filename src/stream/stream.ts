@@ -1092,11 +1092,7 @@ export function buildRequest(
 	if (options.maxTokens !== undefined) {
 		generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
 	} else {
-		generationConfig.maxOutputTokens = Math.min(
-			maxAllowed,
-			model.maxTokens || maxAllowed,
-			thinking?.includeThoughts && runtimeModel.startsWith("claude-opus-4-6") ? 8192 : maxAllowed,
-		);
+		generationConfig.maxOutputTokens = Math.min(maxAllowed, model.maxTokens || maxAllowed);
 	}
 	if (runtimeModel.startsWith("claude-")) {
 		generationConfig.maxOutputTokens = Math.min(

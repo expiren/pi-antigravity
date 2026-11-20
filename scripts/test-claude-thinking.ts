@@ -75,7 +75,7 @@ for (const id of ["claude-opus-4-6", "claude-sonnet-4-6"]) {
     check(`${id} ${reasoning}: uncapped output fits thinking`, () => {
       const config = buildRequest(current, context, "test-project", { reasoning }, runtime).request
         .generationConfig!;
-      assert.equal(config.maxOutputTokens, id === "claude-opus-4-6" ? 8192 : 64000);
+      assert.equal(config.maxOutputTokens, 64000);
       assert.equal(config.thinkingConfig?.thinkingBudget, 1024);
       assert.ok(config.maxOutputTokens! > 1024);
     });
@@ -192,7 +192,7 @@ await fixture(async (f) => {
     f,
     (_token, _attempt, init) => {
       const config = JSON.parse(String(init.body)).request.generationConfig;
-      assert.equal(config.maxOutputTokens, 8192);
+      assert.equal(config.maxOutputTokens, 64000);
       return success();
     },
     { reasoning: "high" },
@@ -206,7 +206,7 @@ await fixture(async (f) => {
   assert.deepEqual(f.store.snapshot().reservations, {});
 });
 console.log(
-  `PASS ${++passed}. uncapped Opus stream sends 8192 without changing existing cooldowns`,
+  `PASS ${++passed}. uncapped Opus stream sends 64000 without changing existing cooldowns`,
 );
 
 await fixture(async (f) => {
