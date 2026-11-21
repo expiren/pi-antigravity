@@ -15,7 +15,7 @@ import {
 } from "../models/image-catalog.js";
 import { antigravityRequestEnvelope, sanitizeText } from "../utils/util.js";
 
-export const DEFAULT_IMAGE_MODEL = "gemini-3-pro-image";
+export const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 export const IMAGE_ASPECT_RATIOS = [
   "1:1",
   "2:3",
@@ -38,10 +38,7 @@ export type ImageSizeTier = (typeof IMAGE_SIZE_TIERS)[number];
  * cannot drift. The provider operation must not substitute models.
  */
 export const IMAGE_MODEL_CANDIDATES: readonly string[] = [
-  DEFAULT_IMAGE_MODEL,
-  ...ANTIGRAVITY_IMAGE_MODELS.map((model) => model.id).filter((id) => id !== DEFAULT_IMAGE_MODEL),
-  // Advertised as a preview only; discovery may not have registered it yet.
-  "gemini-3-pro-image-preview",
+  ...ANTIGRAVITY_IMAGE_MODELS.map((model) => model.id),
 ];
 const IMAGE_SYSTEM_INSTRUCTION =
   "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";

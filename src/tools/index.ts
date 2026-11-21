@@ -190,6 +190,7 @@ async function generateWithPreference(options: {
   const retryDelayMs = 2000;
   let rotations = 0;
   let lastError = "Antigravity image generation failed.";
+  let lastModelId = candidates[0] ?? DEFAULT_IMAGE_MODEL;
 
   let creds = await options.credentialSource.current();
   triedTokens.add(creds.token);
@@ -198,7 +199,6 @@ async function generateWithPreference(options: {
     for (const id of candidates) {
       if (options.signal?.aborted) throw new Error("Request was aborted");
 
-      // Retry each candidate up to maxRetriesPerAttempt times for transient errors.
       for (let retry = 0; retry < maxRetriesPerAttempt; retry++) {
         if (retry > 0 && options.signal?.aborted) throw new Error("Request was aborted");
         const apiKey = JSON.stringify({ token: creds.token, projectId: creds.projectId });
@@ -217,12 +217,14 @@ async function generateWithPreference(options: {
         }
         if (attempted.aborted) throw new Error("Request was aborted");
         lastError = attempted.message;
+        lastModelId = id;
 
-        // Quota errors break out of the retry loop to rotate accounts instead.
         const isQuota = /quota|resource.+exhausted|rate.?limit|429/i.test(lastError);
         if (isQuota) break;
 
-        // Non-quota transient error: wait before retrying the same model+account.
+        // 404 / not-found: model does not exist on this endpoint, skip to next candidate.
+        if (/not.?found|404/i.test(lastError)) break;
+
         if (retry < maxRetriesPerAttempt - 1) {
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (retry + 1)));
         }
@@ -233,7 +235,7 @@ async function generateWithPreference(options: {
     if (!isQuotaError || rotations >= maxRotations) break;
 
     const canRetry = await options.credentialSource.failed({
-      runtimeModel: candidates[0] ?? "gemini-2.0-flash-exp",
+      runtimeModel: lastModelId,
       projectId: creds.projectId ?? "",
       status: 429,
       body: lastError,
@@ -334,7 +336,7 @@ export function registerAntigravityTools(pi: ExtensionAPI): void {
       const hostKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
       if (!hostKey) throw new Error(NO_CREDENTIALS);
       // Resolve the runtime model for the credential source from the first image candidate.
-      const runtimeModel = imageModelCandidates(params.model)[0] ?? "gemini-2.0-flash-exp";
+      const runtimeModel = imageModelCandidates(params.model)[0] ?? DEFAULT_IMAGE_MODEL;
       const credentialSource = new PersistentCredentialSource(runtimeModel);
       if (params.path) resolveImageSavePath(ctx.cwd, params.path);
       const images: Array<{ data: string; mimeType: string }> = [];

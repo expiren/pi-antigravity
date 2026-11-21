@@ -297,6 +297,7 @@ export type AvailableModelsRaw = {
   models?: Record<string, ModelInfoRaw>;
   defaultAgentModelId?: unknown;
   defaultAgentModel?: unknown;
+  imageGenerationModelIds?: string[];
 };
 
 export type TierRaw = {

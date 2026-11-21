@@ -53,7 +53,7 @@ function imageSse(data: string, mimeType = "image/png"): string {
 }
 
 async function main() {
-  assert(assertSafeImageModel("gemini-3-pro-image") === "gemini-3-pro-image", "allow gemini image model");
+  assert(assertSafeImageModel("gemini-3.1-flash-image") === "gemini-3.1-flash-image", "allow gemini image model");
   assert(assertSafeImageModel("imagen-3.0-generate-002") === "imagen-3.0-generate-002", "allow imagen");
   try {
     assertSafeImageModel("claude-opus-4-6");
@@ -97,8 +97,8 @@ async function main() {
     "preferred model leads the candidate order",
   );
   assert(
-    imageModelCandidates().includes("gemini-3-pro-image-preview"),
-    "candidate order keeps the preview fallback",
+    imageModelCandidates().includes("gemini-3.1-flash-image"),
+    "default candidate list includes the seed model",
   );
 
   const decoded = inlineImageData("data:image/jpeg;base64,/9j/4AAQ", "image/png");
@@ -305,6 +305,37 @@ async function main() {
     });
     assert(sizeResult.ok, "requestAntigravityImage with imageSize succeeds");
     assert(capturedBody && capturedBody.includes('"imageSize":"4K"'), "imageSize appears in fetch body");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // ── Banana model regex recognition ──
+  assert(
+    assertSafeImageModel("gemini-nano-banana-2.1") === "gemini-nano-banana-2.1",
+    "banana model id accepted",
+  );
+  assert(
+    assertSafeImageModel("gemini-nano-banana-2.1-preview") === "gemini-nano-banana-2.1-preview",
+    "banana preview model id accepted",
+  );
+
+  // ── 404 fast-fail: model-not-found skips retries and advances to next candidate ──
+  try {
+    let fetchCount = 0;
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify({ error: { message: "model not found" } }), { status: 404 });
+    };
+    const notFound = await requestAntigravityImage({
+      apiKey,
+      model: "gemini-dead-image",
+      prompt: "nothing",
+      aspectRatio: "1:1",
+    });
+    assert(!notFound.ok, "404 model returns failure");
+    // With fast-fail, each endpoint should be tried only once per model (no retry backoff).
+    // 3 endpoints x 1 attempt = 3 fetches, NOT 3 endpoints x 3 retries = 9.
+    assert(fetchCount <= 3, `404 fast-fail: expected at most 3 fetches, got ${fetchCount}`);
   } finally {
     globalThis.fetch = originalFetch;
   }

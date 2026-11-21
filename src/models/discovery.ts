@@ -78,7 +78,7 @@ export async function discoverAntigravityModels(
   return {
     models: chat.models,
     routing: chat.routing,
-    imageModels: buildAntigravityImageModels(models),
+    imageModels: buildAntigravityImageModels(models, available.data.imageGenerationModelIds),
   };
 }
 

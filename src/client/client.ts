@@ -430,6 +430,7 @@ export function mergeAvailableModelsResults(
   results: Array<{ endpoint: string; status: number; data: unknown } | undefined>,
 ): { endpoint: string; status: number; data: AvailableModelsRaw } {
   const mergedModels: Record<string, unknown> = {};
+  const imageIds = new Set<string>();
   let defaultAgentModelId: string | undefined;
   let defaultAgentModel: string | undefined;
   let lastEndpoint = "";
@@ -445,6 +446,11 @@ export function mergeAvailableModelsResults(
     if (isRecord(data) && isRecord(data.models)) {
       Object.assign(mergedModels, data.models);
       registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
+    }
+    if (isRecord(data) && Array.isArray(data.imageGenerationModelIds)) {
+      for (const id of data.imageGenerationModelIds) {
+        if (typeof id === "string" && id.length > 0) imageIds.add(id);
+      }
     }
     if (isRecord(data) && typeof data.defaultAgentModelId === "string") {
       defaultAgentModelId = data.defaultAgentModelId;
@@ -465,6 +471,7 @@ export function mergeAvailableModelsResults(
       models: mergedModels as AvailableModelsRaw["models"],
       defaultAgentModelId,
       defaultAgentModel,
+      imageGenerationModelIds: imageIds.size > 0 ? [...imageIds] : undefined,
     },
   };
 }

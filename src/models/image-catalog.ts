@@ -12,7 +12,6 @@ const IMAGE_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
  * advertises them; they are not part of this seed.
  */
 export const ANTIGRAVITY_IMAGE_MODELS: ProviderModelConfig[] = [
-  imageModel("gemini-3-pro-image", "Gemini 3 Pro Image"),
   imageModel("gemini-3.1-flash-image", "Gemini 3.1 Flash Image"),
 ];
 
@@ -20,7 +19,7 @@ export function isAntigravityImageModelId(id: string): boolean {
   return (
     id.length > 0 &&
     id.length <= 80 &&
-    /^(gemini-[a-z0-9.+-]*image[a-z0-9.+-]*|imagen-[a-z0-9.+-]+)$/i.test(id)
+    /^(gemini-[a-z0-9.+-]*image[a-z0-9.+-]*|gemini-nano-banana-[a-z0-9.+-]+|imagen-[a-z0-9.+-]+)$/i.test(id)
   );
 }
 
@@ -48,6 +47,7 @@ function displayName(info: ModelInfoRaw | undefined, fallback: string): string {
  */
 export function buildAntigravityImageModels(
   rawModels?: Record<string, ModelInfoRaw>,
+  imageGenerationModelIds?: string[],
 ): ProviderModelConfig[] {
   const models = new Map<string, ProviderModelConfig>(
     ANTIGRAVITY_IMAGE_MODELS.map((model) => [model.id, model]),
@@ -62,7 +62,17 @@ export function buildAntigravityImageModels(
         : imageModel(id, displayName(info, id)),
     );
   }
+  if (imageGenerationModelIds) {
+    for (const id of imageGenerationModelIds) {
+      if (models.has(id) || !isSafeImageModelId(id)) continue;
+      models.set(id, imageModel(id, id));
+    }
+  }
   return [...models.values()];
+}
+
+function isSafeImageModelId(id: string): boolean {
+  return id.length > 0 && id.length <= 80 && /^[a-z0-9][a-z0-9.+-]*$/i.test(id);
 }
 
 /** Chat models plus image models. A refresh must return this, or image models disappear. */

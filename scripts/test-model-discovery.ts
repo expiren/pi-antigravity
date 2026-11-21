@@ -18,7 +18,7 @@ import {
   snapshotDynamicModelEnums,
   type AntigravityCatalog,
 } from "../src/models/index.js";
-import { ANTIGRAVITY_IMAGE_API } from "../src/models/image-catalog.js";
+import { ANTIGRAVITY_IMAGE_API, isAntigravityImageModelId } from "../src/models/image-catalog.js";
 import type { ModelInfoRaw } from "../src/types/types.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -48,7 +48,7 @@ const catalog = buildAntigravityCatalog(
     "gemini-3.9-flash-medium": info("Gemini 3.9 Flash (Medium)"),
     "gemini-3.9-flash-high": info("Gemini 3.9 Flash (High)"),
     chat_hidden: info("Hidden chat"),
-    "gemini-3-pro-image": info("Gemini 3 Pro Image"),
+    "gemini-3.1-flash-image": info("Gemini 3.1 Flash Image"),
   },
   fallback,
 );
@@ -71,8 +71,12 @@ const imageModels = buildAntigravityImageModels({
   "gemini-3.9-flash-low": info("Gemini 3.9 Flash (Low)"),
 });
 assert(
-  imageModels.some((model) => model.id === "gemini-3-pro-image" && model.type === "image"),
+  imageModels.some((model) => model.id === "gemini-3.1-flash-image" && model.type === "image"),
   "keeps the image seed",
+);
+assert(
+  imageModels.some((model) => model.id === "gemini-3-pro-image" && model.type === "image"),
+  "discovery adds advertised image ids from rawModels",
 );
 assert(
   imageModels.some((model) => model.id === "gemini-3-pro-image-preview" && model.api === ANTIGRAVITY_IMAGE_API),
@@ -82,13 +86,34 @@ assert(!imageModels.some((model) => model.id === "gemini-3.9-flash-low"), "image
 const listed = listProviderModels(catalog);
 assert(listed.some((model) => model.id === "gemini-3.9-flash"), "provider list keeps chat models");
 assert(
-  listed.some((model) => model.id === "gemini-3-pro-image" && model.type === "image"),
+  listed.some((model) => model.id === "gemini-3.1-flash-image" && model.type === "image"),
   "provider list appends image models when the chat catalog omitted them",
 );
 assert(
   catalog.routing["gemini-3.9-flash"]?.routing?.medium === "gemini-3.9-flash-medium",
   "routes discovered thinking variants",
 );
+
+// ── Banana model regex ──
+assert(isAntigravityImageModelId("gemini-nano-banana-2.1"), "banana model matches image regex");
+assert(isAntigravityImageModelId("gemini-nano-banana-2.1-preview"), "banana preview matches image regex");
+assert(!isAntigravityImageModelId("gemini-3.9-flash-low"), "chat model does not match image regex");
+
+// ── buildAntigravityImageModels with imageGenerationModelIds ──
+const withApiIds = buildAntigravityImageModels(
+  {},
+  ["gemini-nano-banana-2.1", "gemini-3.1-flash-image"],
+);
+assert(
+  withApiIds.some((model) => model.id === "gemini-nano-banana-2.1" && model.type === "image"),
+  "imageGenerationModelIds registers banana models",
+);
+assert(
+  withApiIds.some((model) => model.id === "gemini-3.1-flash-image"),
+  "imageGenerationModelIds does not duplicate seed models",
+);
+const withBadIds = buildAntigravityImageModels({}, [""]);
+assert(!withBadIds.some((model) => model.id === ""), "empty string rejected from imageGenerationModelIds");
 
 // Provider-owned persistence restores routing and dynamic enums before offline/network checks.
 const dynamicCatalog = buildAntigravityCatalog(
@@ -221,7 +246,7 @@ try {
   );
   const storedModels = publishedPersistModels(published);
   assert(storedModels?.some((model) => model.id === "gemini-4-argon"), "publishes Argon to Pi");
-  const storedImage = storedModels?.find((model) => model.id === "gemini-3-pro-image");
+  const storedImage = storedModels?.find((model) => model.id === "gemini-3.1-flash-image");
   assert(storedImage?.type === "image" && storedImage.api === ANTIGRAVITY_IMAGE_API, "persists image models as image");
   assert(
     storedModels?.some((model) => model.id === "gemini-10.0-flash" && model.type !== "image"),
