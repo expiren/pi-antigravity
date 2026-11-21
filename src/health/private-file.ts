@@ -14,65 +14,79 @@ import {
 import { dirname, parse, resolve } from "node:path";
 import { HealthStoreError } from "./errors.js";
 
-// The path is an environment value, never interpolated into PowerShell source.
-// A new file is empty until this ACL has been installed and verified.
-const WINDOWS_ACL = `
-$ErrorActionPreference = 'Stop'
-$p = $env:ANTIGRAVITY_HEALTH_PRIVATE_PATH
-$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$allowed = @($me.Value, 'S-1-5-18', 'S-1-5-32-544')
-$acl = [System.IO.File]::GetAccessControl($p)
-if ($env:ANTIGRAVITY_HEALTH_PRIVATE_SET -eq '1') {
-  $acl.SetAccessRuleProtection($true, $false)
-  foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($r) }
-  $acl.SetOwner($me)
-  foreach ($s in $allowed) {
-    $sid = [System.Security.Principal.SecurityIdentifier]::new($s)
-    $r = [System.Security.AccessControl.FileSystemAccessRule]::new(
-      $sid, [System.Security.AccessControl.FileSystemRights]::FullControl,
-      [System.Security.AccessControl.AccessControlType]::Allow)
-    $acl.AddAccessRule($r)
+/** Well-known SIDs that may hold FullControl on a private health file. */
+const SYSTEM_SID = "S-1-5-18";
+const ADMIN_SID = "S-1-5-32-544";
+
+let cachedUserSid: string | undefined;
+
+function currentUserSid(): string {
+  if (cachedUserSid) return cachedUserSid;
+  const output = execFileSync("whoami", ["/user", "/fo", "csv"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 5_000,
+  });
+  // Output: "User Name","SID"\r\n"...\user","S-1-5-..."
+  const match = output.match(/"(S-1-[\d-]+)"/);
+  if (!match) {
+    throw new HealthStoreError("unsafe", "Could not determine the current user SID.");
   }
-  [System.IO.File]::SetAccessControl($p, $acl)
-  $acl = [System.IO.File]::GetAccessControl($p)
+  cachedUserSid = match[1];
+  return cachedUserSid;
 }
-if (-not $acl.AreAccessRulesProtected) { throw 'unprotected' }
-if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $me.Value) {
-  throw 'owner'
-}
-$full = $false
-foreach ($r in $acl.Access) {
-  $sid = $r.IdentityReference.Translate(
-    [System.Security.Principal.SecurityIdentifier]).Value
-  if ($r.AccessControlType -ne 'Allow' -or $allowed -notcontains $sid) { throw 'access' }
-  if ($sid -eq $me.Value -and
-    ($r.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq
-      [System.Security.AccessControl.FileSystemRights]::FullControl) { $full = $true }
-}
-if (-not $full) { throw 'rights' }
-[Console]::Write('PRIVATE')
-`;
 
 function windowsPrivate(path: string, set: boolean): void {
   try {
-    const result = execFileSync(
-      "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL],
-      {
+    const sid = currentUserSid();
+
+    if (set) {
+      const result = execFileSync("icacls", [
+        path,
+        "/inheritance:r",
+        "/grant:r", `*${sid}:(F)`,
+        "/grant:r", `*${SYSTEM_SID}:(F)`,
+        "/grant:r", `*${ADMIN_SID}:(F)`,
+      ], {
         encoding: "utf8",
         windowsHide: true,
-        timeout: 15_000,
-        maxBuffer: 4096,
+        timeout: 5_000,
         stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          ANTIGRAVITY_HEALTH_PRIVATE_PATH: path,
-          ANTIGRAVITY_HEALTH_PRIVATE_SET: set ? "1" : "0",
-        },
-      },
-    );
-    if (result.trim() !== "PRIVATE") throw new Error();
-  } catch {
+      });
+      if (!result.includes("Successfully processed")) throw new Error(result);
+    }
+
+    // Verify: parse icacls output and check only allowed SIDs with (F), no (I).
+    const output = execFileSync("icacls", [path], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (!output.includes("Successfully processed")) throw new Error(output);
+
+    // Each ACE line looks like:  SID-OR-NAME:(FLAGS)(RIGHTS)
+    // Inherited ACEs have (I) or (OI)(CI)(I) etc.
+    // We reject any ACE with (I) and require each non-path line to have (F).
+    const lines = output.split(/\r?\n/);
+    // First line contains the path; subsequent non-empty lines before "Successfully" are ACEs.
+    // ACEs may appear on the same line as the path or on continuation lines.
+    const acePart = lines.join(" ").replace(/\s+Successfully processed.*/, "");
+    // Extract individual ACE entries: "NAME:(perms)" patterns
+    const acePattern = /\S+:\([^)]*\)(?:\([^)]*\))*/g;
+    const aces: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = acePattern.exec(acePart)) !== null) {
+      aces.push(m[0]);
+    }
+    if (aces.length === 0 || aces.length > 3) throw new Error("unexpected ACE count");
+
+    for (const ace of aces) {
+      if (ace.includes("(I)")) throw new Error("inherited ACE found");
+      if (!ace.includes("(F)")) throw new Error("non-full-control ACE");
+    }
+  } catch (error) {
+    if (error instanceof HealthStoreError) throw error;
     throw new HealthStoreError(
       "unsafe",
       "Health file ACL could not be verified. Restore a private owner-only ACL before retrying.",
@@ -183,6 +197,36 @@ export function readPrivateFile(path: string, maxBytes: number): string {
         "capacity",
         "Health state exceeds the safe size limit; inspect it locally.",
       );
+    }
+    return buffer.toString("utf8", 0, bytes);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Read a transient lock or gate file without ACL verification.
+ * These files are always created by createPrivateFile (which sets the ACL),
+ * and can be deleted by concurrent processes at any moment, so spawning
+ * PowerShell to verify their ACL is both slow and racy.
+ */
+export function readLockFile(path: string, maxBytes: number): string {
+  rejectSymlinkParents(path);
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > maxBytes) {
+      throw new HealthStoreError("unsafe", "Lock file is not a regular private file.");
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const count = readSync(fd, buffer, bytes, buffer.length - bytes, null);
+      if (count === 0) break;
+      bytes += count;
+    }
+    if (bytes > maxBytes) {
+      throw new HealthStoreError("unsafe", "Lock file exceeds the size limit.");
     }
     return buffer.toString("utf8", 0, bytes);
   } finally {

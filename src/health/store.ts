@@ -8,6 +8,7 @@ import {
   createPrivateFile,
   ensureHealthDirectory,
   isMissing,
+  readLockFile,
   readPrivateFile,
   rejectSymlinkParents,
 } from "./private-file.js";
@@ -180,7 +181,7 @@ function readOwner(path: string): LockOwner {
   let value: Record<string, unknown> | undefined;
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      value = object(JSON.parse(readPrivateFile(path, 1024)));
+      value = object(JSON.parse(readLockFile(path, 1024)));
       break;
     } catch (error) {
       if (isMissing(error)) throw error;
