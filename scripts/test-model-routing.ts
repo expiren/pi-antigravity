@@ -25,6 +25,9 @@ import {
   convertTools,
   friendlyAntigravityError,
   mapStopReason,
+  sanitizeSystemPrompt,
+  shouldInlineSystem,
+  inlineSystemInstruction,
 } from "../src/stream/index.js";
 import {
   antigravityRequestEnvelope,
@@ -1324,17 +1327,18 @@ const skillOnlyRequest = buildRequest(
   {},
   "gemini-3.7-flash-low",
 );
+// Builtin system instruction > 126 chars → inlined into user turn
 assert.equal(skillOnlyRequest.request.contents.length, 1);
 assert.equal(skillOnlyRequest.request.contents[0]?.role, "user");
-assert.equal(
-  skillOnlyRequest.request.contents[0]?.parts[0]?.text,
-  "Apply the active system instructions.",
+assert.ok(
+  (skillOnlyRequest.request.contents[0]?.parts[0] as { text: string })?.text.includes("Antigravity"),
+  "inlined system instruction must contain builtin persona",
 );
-assert.equal(skillOnlyRequest.request.systemInstruction.parts.length, 3);
-assert.equal(
-  skillOnlyRequest.request.systemInstruction.parts[2]?.text,
-  '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+assert.ok(
+  (skillOnlyRequest.request.contents[0]?.parts[0] as { text: string })?.text.includes("Group commits by intent."),
+  "inlined system instruction must contain skill text",
 );
+assert.equal(skillOnlyRequest.request.systemInstruction, undefined);
 
 const systemOnlyRequest = buildRequest(
   flash37Model,
@@ -1366,11 +1370,16 @@ const skillAndUserRequest = buildRequest(
   {},
   "gemini-3.7-flash-low",
 );
-assert.equal(skillAndUserRequest.request.contents[0]?.parts[0]?.text, " Commit the staged changes.");
-assert.equal(
-  skillAndUserRequest.request.systemInstruction.parts[2]?.text,
-  '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+// Builtin system instruction > 126 chars → inlined; user text preserved after it
+assert.ok(
+  (skillAndUserRequest.request.contents[0]?.parts[0] as { text: string })?.text.includes("Antigravity"),
+  "inlined system instruction must contain builtin persona",
 );
+assert.equal(
+  (skillAndUserRequest.request.contents[0]?.parts[1] as { text: string })?.text,
+  " Commit the staged changes.",
+);
+assert.equal(skillAndUserRequest.request.systemInstruction, undefined);
 
 // Tool-result-only turns also need no synthetic user text.
 const toolResultOnlyContext = {
@@ -1397,15 +1406,26 @@ assert.equal(toolResultOnlyRequest.request.contents[0]?.role, "user");
 assert.ok(
   toolResultOnlyRequest.request.contents[0]?.parts.some((part) => "functionResponse" in part),
 );
+// Builtin system instruction > 126 chars → inlined; continuation text preserved
+assert.ok(
+  toolResultOnlyRequest.request.contents[0]?.parts.some(
+    (part) => "text" in part && part.text.includes("Antigravity"),
+  ),
+);
 assert.ok(
   toolResultOnlyRequest.request.contents[0]?.parts.some(
     (part) => "text" in part && part.text === "Continue the active task using the available instructions and context.",
   ),
 );
+assert.equal(toolResultOnlyRequest.request.systemInstruction, undefined);
 
 const fallbackPersona = buildRequest(flash37Model, dummyContext, "test-proj", {}, "gemini-3.7-flash-low");
-assert.equal(fallbackPersona.request.systemInstruction.parts.length, 2);
-assert.match(fallbackPersona.request.systemInstruction.parts[0]?.text || "", /You are Antigravity/);
+// Builtin system instruction > 126 chars → inlined; no systemInstruction on wire
+assert.equal(fallbackPersona.request.systemInstruction, undefined);
+assert.match(
+  (fallbackPersona.request.contents[0]?.parts[0] as { text: string })?.text || "",
+  /You are Antigravity/,
+);
 
 const flashCost = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.7-flash")?.cost;
 assert.equal(flashCost?.input, 0.75);
@@ -2080,6 +2100,79 @@ assert.ok(convertedErrored.length >= 1, "must produce at least one turn");
 const allText = convertedErrored.flatMap((t) => t.parts.filter((p): p is { text: string } => "text" in p).map((p) => p.text));
 assert.ok(allText.some((t) => t.includes("[Observation from")), "observations must appear as text");
 console.log("PASS orphaned tool_use: errored assistant with toolResults converted to text");
+
+// ─── systemInstruction folding & sanitization ────────────────────────────────
+
+// sanitizeSystemPrompt: Pi harness fingerprints neutralised
+assert.match(
+  sanitizeSystemPrompt("You are a coding assistant running inside pi-bolt, a build of pi (a coding agent harness) compiled ahead of time. Help users inspect files, run commands, and modify code."),
+  /^You are a coding agent helping the user/,
+);
+// sanitizeSystemPrompt: unrelated text unchanged
+assert.equal(
+  sanitizeSystemPrompt("Just a plain system prompt."),
+  "Just a plain system prompt.",
+);
+
+// shouldInlineSystem: short → false
+assert.equal(shouldInlineSystem([{ text: "Short prompt." }]), false);
+// shouldInlineSystem: long → true
+assert.equal(shouldInlineSystem([{ text: "A".repeat(127) }]), true);
+// shouldInlineSystem: boundary → false (exactly 126 chars)
+assert.equal(shouldInlineSystem([{ text: "B".repeat(126) }]), false);
+// shouldInlineSystem: multi-part summed
+assert.equal(shouldInlineSystem([{ text: "C".repeat(64) }, { text: "D".repeat(64) }]), true);
+
+// inlineSystemInstruction: basic folding
+{
+  const c = [{ role: "user" as const, parts: [{ text: "user msg" }] }];
+  inlineSystemInstruction(c, [{ text: "sys" }], false);
+  assert.equal(c[0]!.parts[0]!.text, "sys");
+  assert.equal(c[0]!.parts[1]!.text, "user msg");
+  assert.equal(c.length, 1);
+}
+// inlineSystemInstruction: drop placeholder
+{
+  const c = [{ role: "user" as const, parts: [{ text: "placeholder" }, { text: "extra" }] }];
+  inlineSystemInstruction(c, [{ text: "sys" }], true);
+  assert.equal(c[0]!.parts[0]!.text, "sys");
+  assert.equal(c[0]!.parts[1]!.text, "extra");
+  assert.equal(c[0]!.parts.length, 2);
+}
+// inlineSystemInstruction: no user turn → prepends one
+{
+  const c = [{ role: "model" as const, parts: [{ text: "response" }] }];
+  inlineSystemInstruction(c as any, [{ text: "sys" }], false);
+  assert.equal(c[0]!.role, "user");
+  assert.equal((c[0]!.parts[0] as { text: string }).text, "sys");
+  assert.equal(c.length, 2);
+}
+
+// buildRequest: short caller-provided systemPrompt stays on wire
+{
+  const short = buildRequest(
+    flash37Model,
+    { ...dummyContext, systemPrompt: "Be brief." } as Context,
+    "test-proj", {}, "gemini-3.7-flash-low",
+  );
+  assert.ok(short.request.systemInstruction, "short systemPrompt must stay on wire");
+  assert.equal(short.request.systemInstruction!.parts[0]?.text, "Be brief.");
+}
+// buildRequest: long Pi-style systemPrompt is inlined
+{
+  const long = buildRequest(
+    flash37Model,
+    { ...dummyContext, systemPrompt: "X".repeat(200) } as Context,
+    "test-proj", {}, "gemini-3.7-flash-low",
+  );
+  assert.equal(long.request.systemInstruction, undefined);
+  assert.ok(
+    (long.request.contents[0]?.parts[0] as { text: string })?.text.includes("X".repeat(200)),
+    "long systemPrompt must be inlined into user turn",
+  );
+}
+
+console.log("PASS systemInstruction folding & sanitization");
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,

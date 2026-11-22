@@ -134,7 +134,7 @@ export type GeminiGenerationConfig = {
 
 export type GeminiRequestBody = {
   contents: GeminiContent[];
-  systemInstruction: {
+  systemInstruction?: {
     role: "user";
     parts: GeminiTextPart[];
   };
