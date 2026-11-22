@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import type { Api, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
-import { streamAntigravity } from "../src/stream/stream.js";
+import { streamAntigravity, _setRotationSleep } from "../src/stream/stream.js";
 import type { CredentialSource } from "../src/runtime/index.js";
 
 // A manually advanced clock: deadlines fire only after the exact timer is armed.
@@ -166,6 +166,9 @@ const errorText = (events: AssistantMessageEvent[]) => {
   return event.error.errorMessage ?? "";
 };
 try {
+  // Inject instant rotation sleep that records requested delays.
+  const sleepLog: number[] = [];
+  _setRotationSleep(async (ms) => { sleepLog.push(ms); });
   let result = await scenario("silent HTTP 200", [silent], async () => {
     await fire(53);
   });
@@ -458,6 +461,86 @@ try {
   );
   assert.equal(result.rotations, 0);
   assert.match(errorText(result.events), /stream stalled/);
+
+  // ── Transient 429 backoff and circuit breaker ────────────────────────
+  // Bare RESOURCE_EXHAUSTED is transient (not isHardQuotaWall).
+  const transient429 = () => new Response("RESOURCE_EXHAUSTED", { status: 429 });
+
+  sleepLog.length = 0;
+  process.env.ANTIGRAVITY_STREAM_MAX_TRANSIENT_ROTATIONS = "3";
+  process.env.ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_BASE_MS = "100";
+  process.env.ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_CAP_MS = "1000";
+  result = await scenario(
+    "transient 429 circuit breaker trips after max rotations",
+    Array(10).fill(transient429),
+    undefined,
+    { budget: 10 },
+  );
+  assert.equal(result.attempted.length, 3); // 1 initial + 2 rotations, breaker trips on 3rd fail
+  assert.equal(result.rotations, 2);
+  assert.match(errorText(result.events), /circuit breaker tripped/);
+  assert.match(errorText(result.events), /3 consecutive transient 429s/);
+  // Verify exponential backoff: 100, 200 (before jitter); breaker trips before 3rd sleep.
+  assert.equal(sleepLog.length, 2);
+  assert(sleepLog[0]! >= 100 && sleepLog[0]! <= 125, `backoff 0: ${sleepLog[0]}`);
+  assert(sleepLog[1]! >= 200 && sleepLog[1]! <= 250, `backoff 1: ${sleepLog[1]}`);
+  console.log("PASS transient 429 circuit breaker trips after max rotations");
+
+  sleepLog.length = 0;
+  result = await scenario(
+    "hard quota 429 rotates without backoff",
+    [
+      () => new Response("Individual quota reached. Resets in 1h.", { status: 429 }),
+      () => new Response("Individual quota reached. Resets in 1h.", { status: 429 }),
+      success,
+    ],
+    undefined,
+    { budget: 3 },
+  );
+  assert.equal(result.attempted.length, 3);
+  assert.equal(result.rotations, 2);
+  assert.equal(sleepLog.length, 0, "hard quota should not sleep");
+  console.log("PASS hard quota 429 rotates without backoff");
+
+  sleepLog.length = 0;
+  result = await scenario(
+    "mixed hard+transient 429 resets consecutive counter",
+    [
+      transient429,  // transient: consecutive=1, backoff
+      transient429,  // transient: consecutive=2, backoff
+      () => new Response("Individual quota reached. Resets in 1h.", { status: 429 }), // hard: consecutive=0
+      transient429,  // transient: consecutive=1, backoff
+      success,
+    ],
+    undefined,
+    { budget: 10 },
+  );
+  assert.equal(result.attempted.length, 5);
+  assert.equal(result.rotations, 4);
+  // 2 transient sleeps + 0 hard + 1 transient sleep = 3 sleeps
+  assert.equal(sleepLog.length, 3, `expected 3 sleeps, got ${sleepLog.length}`);
+  // After hard quota reset, the third transient starts at base again.
+  assert(sleepLog[2]! >= 100 && sleepLog[2]! <= 125, `after reset backoff: ${sleepLog[2]}`);
+  console.log("PASS mixed hard+transient 429 resets consecutive counter");
+
+  sleepLog.length = 0;
+  process.env.ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_CAP_MS = "150";
+  result = await scenario(
+    "transient 429 backoff caps at configured maximum",
+    [transient429, transient429, success],
+    undefined,
+    { budget: 10 },
+  );
+  assert.equal(sleepLog.length, 2);
+  // Second backoff: min(100*2^1=200, cap=150) → 150 (before jitter).
+  assert(sleepLog[1]! >= 150 && sleepLog[1]! <= 187, `capped backoff: ${sleepLog[1]}`);
+  console.log("PASS transient 429 backoff caps at configured maximum");
+
+  // Cleanup env overrides for subsequent tests.
+  delete process.env.ANTIGRAVITY_STREAM_MAX_TRANSIENT_ROTATIONS;
+  delete process.env.ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_BASE_MS;
+  delete process.env.ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_CAP_MS;
+
   console.log("All silent-stream recovery tests passed");
 } finally {
   globalThis.fetch = realFetch;

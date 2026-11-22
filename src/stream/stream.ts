@@ -1300,6 +1300,38 @@ export function streamMaxAccountChanges(): number {
 	return envTimeoutMs("STREAM_MAX_ACCOUNT_CHANGES", 3);
 }
 
+/** Maximum consecutive transient-429 rotations before aborting, from ANTIGRAVITY_STREAM_MAX_TRANSIENT_ROTATIONS. */
+export function streamMaxTransientRotations(): number {
+	return envTimeoutMs("STREAM_MAX_TRANSIENT_ROTATIONS", 6);
+}
+
+/** Transient-429 rotation backoff base in ms, from ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_BASE_MS. */
+function transientBackoffBaseMs(): number {
+	return envTimeoutMs("STREAM_TRANSIENT_BACKOFF_BASE_MS", 2000);
+}
+
+/** Transient-429 rotation backoff cap in ms, from ANTIGRAVITY_STREAM_TRANSIENT_BACKOFF_CAP_MS. */
+function transientBackoffCapMs(): number {
+	return envTimeoutMs("STREAM_TRANSIENT_BACKOFF_CAP_MS", 30_000);
+}
+
+/**
+ * Abortable sleep that resolves after `ms` or rejects immediately on signal abort.
+ * Override `_rotationSleep` for deterministic tests.
+ */
+export let _rotationSleep: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) =>
+	new Promise((resolve, reject) => {
+		if (signal?.aborted) return reject(new Error("Request was aborted"));
+		const onAbort = () => { clearTimeout(timer); reject(new Error("Request was aborted")); };
+		const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+		if (typeof (timer as { unref?: () => void }).unref === "function") (timer as { unref: () => void }).unref();
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+/** Test hook: replace the rotation sleep implementation. */
+export function _setRotationSleep(fn: typeof _rotationSleep): void {
+	_rotationSleep = fn;
+}
+
 /**
  * Streaming header deadline in milliseconds, from ANTIGRAVITY_STREAM_HEADER_TIMEOUT_MS
  * (or the legacy NOAGY_ prefix). 0 disables the deadline; invalid values fall back
@@ -1759,6 +1791,8 @@ export function streamAntigravity(
 			let runtimeModel = initialRuntimeModel;
 			let accountChanges = 0;
 			const maxAccountChanges = streamMaxAccountChanges();
+			const maxTransientRotations = streamMaxTransientRotations();
+			let consecutiveTransient429 = 0;
 
 			while (true) {
 				if (opts.signal?.aborted) throw new Error("Request was aborted");
@@ -1929,11 +1963,30 @@ export function streamAntigravity(
 						!(error instanceof RecoverableStreamError)
 					)
 						throw error;
+					// Classify transient vs hard 429 for backoff and circuit breaker.
+					const isTransient429 = response?.status === 429 && !isHardQuotaWall(lastText);
+					if (isTransient429) {
+						consecutiveTransient429++;
+					} else {
+						consecutiveTransient429 = 0;
+					}
 					const exhausted = (reason: string) =>
 						new Error(
-							`${safeError(error)} Recovery exhausted: ${reason} (${accountChanges}/${maxAccountChanges} account changes). Next: retry later or switch models.`,
+							`${safeError(error)} Recovery exhausted: ${reason} (${accountChanges}/${maxAccountChanges} account changes, ${consecutiveTransient429} consecutive transient 429s). Next: retry later or switch models.`,
 						);
+					if (isTransient429 && consecutiveTransient429 >= maxTransientRotations) {
+						throw exhausted("transient rate-limit circuit breaker tripped");
+					}
 					if (accountChanges >= maxAccountChanges) throw exhausted("account-change budget reached");
+					// Backoff before rotating on transient 429 to let IP burst limiter clear.
+					if (isTransient429) {
+						const backoff = Math.min(
+							transientBackoffBaseMs() * 2 ** (consecutiveTransient429 - 1),
+							transientBackoffCapMs(),
+						);
+						const jitter = Math.floor(backoff * 0.25 * Math.random());
+						await _rotationSleep(backoff + jitter, opts.signal);
+					}
 					const next = await credentialSource?.rotate(triedAccessTokens);
 					if (opts.signal?.aborted) throw new Error("Request was aborted", { cause: error });
 					if (!next || triedAccessTokens.has(next.token)) {
