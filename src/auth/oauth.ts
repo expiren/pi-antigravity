@@ -392,43 +392,150 @@ export async function loginAntigravity(
   }
 }
 
+/** Permanent OAuth error codes that must not be retried. */
+const PERMANENT_OAUTH_ERRORS = new Set([
+  "invalid_grant",
+  "invalid_client",
+  "unauthorized_client",
+]);
+
+/** Transient OAuth error codes that should be retried even on HTTP 400. */
+const TRANSIENT_OAUTH_ERRORS = new Set([
+  "internal_failure",
+  "server_error",
+  "temporarily_unavailable",
+]);
+
+export class OAuthRefreshError extends Error {
+  readonly status?: number;
+  readonly oauthError?: string;
+  readonly retryable: boolean;
+  constructor(message: string, status: number | undefined, oauthError: string | undefined, retryable: boolean) {
+    super(message);
+    this.name = "OAuthRefreshError";
+    this.status = status;
+    this.oauthError = oauthError;
+    this.retryable = retryable;
+  }
+}
+
+const OAUTH_RETRY_DELAYS = [500, 1000, 2000];
+const OAUTH_ATTEMPT_TIMEOUT_MS = 10_000;
+
+/**
+ * Abortable sleep for OAuth retry backoff. Override `_oauthRetrySleep` for
+ * deterministic tests (same pattern as `_rotationSleep` in stream.ts).
+ */
+export let _oauthRetrySleep: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("Request was aborted"));
+    const onAbort = () => { clearTimeout(timer); reject(new Error("Request was aborted")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    if (typeof (timer as { unref?: () => void }).unref === "function") (timer as { unref: () => void }).unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+/** Test hook: replace the OAuth retry sleep implementation. */
+export function _setOAuthRetrySleep(fn: typeof _oauthRetrySleep): void {
+  _oauthRetrySleep = fn;
+}
+
+/** Injectable fetch for tests; defaults to globalThis.fetch. */
+let _oauthFetch: typeof globalThis.fetch = (...args) => globalThis.fetch(...args);
+/** Test hook: replace the fetch used by refreshAntigravityToken. */
+export function _setOAuthFetch(fn: typeof globalThis.fetch): void {
+  _oauthFetch = fn;
+}
+
+function parseOAuthError(text: string): string | undefined {
+  try {
+    const parsed = JSON.parse(text) as { error?: string };
+    return typeof parsed.error === "string" ? parsed.error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRetryable(status: number | undefined, oauthError: string | undefined): boolean {
+  if (oauthError && PERMANENT_OAUTH_ERRORS.has(oauthError)) return false;
+  if (oauthError && TRANSIENT_OAUTH_ERRORS.has(oauthError)) return true;
+  if (status !== undefined && (status >= 500 || status === 429)) return true;
+  return false;
+}
+
 export async function refreshAntigravityToken(
   credentials: OAuthCredentials,
+  signal?: AbortSignal,
 ): Promise<AntigravityOAuthCredentials> {
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      refresh_token: credentials.refresh,
-      grant_type: "refresh_token",
-    }).toString(),
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Antigravity token refresh failed: ${sanitizeOAuthProviderError(await response.text())}`,
-    );
+  const body = new URLSearchParams({
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    refresh_token: credentials.refresh,
+    grant_type: "refresh_token",
+  }).toString();
+  let lastError: OAuthRefreshError | undefined;
+  for (let attempt = 0; attempt <= OAUTH_RETRY_DELAYS.length; attempt++) {
+    if (signal?.aborted) throw new Error("Request was aborted");
+    try {
+      const timeoutSignal = AbortSignal.timeout(OAUTH_ATTEMPT_TIMEOUT_MS);
+      const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const response = await _oauthFetch(TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+        signal: combinedSignal,
+      });
+      if (!response.ok) {
+        const responseText = await response.text();
+        const oauthError = parseOAuthError(responseText);
+        const retryable = isRetryable(response.status, oauthError);
+        const err = new OAuthRefreshError(
+          `Antigravity token refresh failed: ${sanitizeOAuthProviderError(responseText)}`,
+          response.status,
+          oauthError,
+          retryable,
+        );
+        if (!retryable) throw err;
+        lastError = err;
+        if (attempt < OAUTH_RETRY_DELAYS.length) {
+          const jitter = Math.floor(OAUTH_RETRY_DELAYS[attempt] * 0.25 * Math.random());
+          await _oauthRetrySleep(OAUTH_RETRY_DELAYS[attempt] + jitter, signal);
+        }
+        continue;
+      }
+      const data = (await response.json()) as {
+        access_token: string;
+        expires_in: number;
+        refresh_token?: string;
+      };
+      const existingProjectId = credentialProjectId(credentials);
+      const discoveredProject = existingProjectId ? undefined : await loadCodeAssist(data.access_token);
+      const email = credentialEmail(credentials);
+      return {
+        ...credentials,
+        refresh: data.refresh_token || credentials.refresh,
+        access: data.access_token,
+        expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
+        projectId:
+          existingProjectId || discoveredProject || defaultProjectId(email || "antigravity-default"),
+      };
+    } catch (err) {
+      if (err instanceof OAuthRefreshError) throw err;
+      if (signal?.aborted) throw new Error("Request was aborted", { cause: err });
+      // Network / timeout errors are retryable
+      const retryable = true;
+      lastError = new OAuthRefreshError(
+        `Antigravity token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+        undefined,
+        undefined,
+        retryable,
+      );
+      if (attempt < OAUTH_RETRY_DELAYS.length) {
+        const jitter = Math.floor(OAUTH_RETRY_DELAYS[attempt] * 0.25 * Math.random());
+        await _oauthRetrySleep(OAUTH_RETRY_DELAYS[attempt] + jitter, signal);
+      }
+    }
   }
-  const data = (await response.json()) as {
-    access_token: string;
-    expires_in: number;
-    refresh_token?: string;
-  };
-  // Every refresh mints a brand-new access token, so loadCodeAssist's token-keyed cache
-  // can never hit here — skip the extra round-trip entirely when we already know the
-  // project id (the normal case; it's set at login and doesn't change token to token).
-  const existingProjectId = credentialProjectId(credentials);
-  const discoveredProject = existingProjectId ? undefined : await loadCodeAssist(data.access_token);
-  const email = credentialEmail(credentials);
-  return {
-    ...credentials,
-    refresh: data.refresh_token || credentials.refresh,
-    access: data.access_token,
-    expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-    projectId:
-      existingProjectId || discoveredProject || defaultProjectId(email || "antigravity-default"),
-  };
+  throw lastError!;
 }
 
 export function getApiKey(credentials: OAuthCredentials): string {

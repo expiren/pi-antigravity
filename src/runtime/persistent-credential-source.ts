@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getAccountApiKey, loadAccountStore, syncCurrentAuth } from "../auth/accounts.js";
+import { OAuthRefreshError } from "../auth/oauth.js";
 import { setHealthSelection, type HealthSelection } from "../diagnostics/diagnostics.js";
 import { classifyHealthFailure } from "../health/classification.js";
 import { healthScope, recordKey } from "../health/scope.js";
@@ -7,6 +8,19 @@ import { HealthPoolError, selectAccount } from "../health/selection.js";
 import { HealthStore, healthStorePath } from "../health/store.js";
 import type { HealthScope } from "../health/types.js";
 import type { AntigravityApiKey, CredentialFailure, CredentialSource } from "../types/types.js";
+import { antigravityEnv } from "../utils/util.js";
+
+/** Transient refresh failure cooldown — 60 seconds (same as transient 429). */
+const REFRESH_TRANSIENT_COOLDOWN_MS = 60_000;
+/** Permanent refresh failure cooldown — 5 minutes (same as auth_error 401/403). */
+const REFRESH_PERMANENT_COOLDOWN_MS = 300_000;
+
+function maxRefreshFallbacks(): number {
+  const raw = antigravityEnv("OAUTH_MAX_REFRESH_FALLBACKS");
+  if (!raw || !/^\d+$/.test(raw)) return 3;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 && value <= 100 ? value : 3;
+}
 
 /** Per-request state, never shared by concurrent streams using the default source. */
 export class PersistentCredentialSource implements CredentialSource {
@@ -33,48 +47,100 @@ export class PersistentCredentialSource implements CredentialSource {
       syncCurrentAuth();
       accounts = loadAccountStore(true);
     }
-    const chosen = this.store.update((state) =>
-      selectAccount({
-        state,
-        accounts: Object.values(accounts.accounts),
-        activeAccountId: accounts.activeAccountId,
-        model: this.model,
-        excluded: new Set(
-          [...this.triedIds].filter((id) => id !== this.scope?.accountId || !preferredAccountId),
-        ),
-        excludedTokens,
-        reservationId: this.reservationId,
-        now: this.now(),
-        preferredAccountId,
-      }),
-    );
-    if (chosen instanceof HealthPoolError) {
-      setHealthSelection({
-        selectedAccount: "none",
-        runtimeModel: this.model,
-        rotationCount: this.selection?.rotationCount ?? 0,
+    const refreshExcluded = new Set<string>();
+    let consecutiveTransient = 0;
+    let lastRefreshError: OAuthRefreshError | undefined;
+    const cap = maxRefreshFallbacks();
+    for (;;) {
+      const combinedExcluded = new Set([
+        ...[...this.triedIds].filter((id) => id !== this.scope?.accountId || !preferredAccountId),
+        ...refreshExcluded,
+      ]);
+      const chosen = this.store.update((state) =>
+        selectAccount({
+          state,
+          accounts: Object.values(accounts.accounts),
+          activeAccountId: accounts.activeAccountId,
+          model: this.model,
+          excluded: combinedExcluded,
+          excludedTokens,
+          reservationId: this.reservationId,
+          now: this.now(),
+          preferredAccountId,
+        }),
+      );
+      if (chosen instanceof HealthPoolError) {
+        // If we got here because of refresh failures, rethrow the last refresh error
+        // instead of a generic pool-exhaustion error.
+        if (lastRefreshError) throw lastRefreshError;
+        setHealthSelection({
+          selectedAccount: "none",
+          runtimeModel: this.model,
+          rotationCount: this.selection?.rotationCount ?? 0,
+          skipReasons: chosen.skipReasons,
+          basis: "unknown",
+          lastFailureClass: this.selection?.lastFailureClass,
+        });
+        throw chosen;
+      }
+      const changedIdentity =
+        this.scope !== undefined && this.scope.accountId !== chosen.scope.accountId;
+      this.scope = chosen.scope;
+      this.accountId = chosen.account.accountId;
+      this.triedIds.add(chosen.scope.accountId);
+      this.selection = {
+        selectedAccount: chosen.scope.accountId,
+        runtimeModel: chosen.scope.model,
+        rotationCount: (this.selection?.rotationCount ?? 0) + Number(changedIdentity),
         skipReasons: chosen.skipReasons,
-        basis: "unknown",
+        basis: chosen.basis,
         lastFailureClass: this.selection?.lastFailureClass,
-      });
-      throw chosen;
+      };
+      setHealthSelection(this.selection);
+      try {
+        this.creds = await getAccountApiKey(chosen.account.accountId);
+        return this.creds;
+      } catch (err) {
+        const refreshErr = err instanceof OAuthRefreshError ? err : undefined;
+        if (!refreshErr) throw err;
+        lastRefreshError = refreshErr;
+        // Record a health cooldown so other concurrent requests also skip this account.
+        const scope = healthScope(
+          chosen.account.accountId,
+          chosen.scope.projectId,
+          chosen.scope.model,
+        );
+        const cooldownMs = refreshErr.retryable
+          ? REFRESH_TRANSIENT_COOLDOWN_MS
+          : REFRESH_PERMANENT_COOLDOWN_MS;
+        this.store.update((state) => {
+          const key = recordKey(scope);
+          const previous = state.records[key];
+          const cooldownUntil = this.now() + cooldownMs;
+          const keepPrevious = previous && previous.cooldownUntil > cooldownUntil;
+          state.records[key] = {
+            ...previous,
+            ...scope,
+            status: keepPrevious
+              ? previous.status
+              : refreshErr.retryable ? "temporary_unavailable" : "auth_error",
+            reason: keepPrevious
+              ? previous.reason
+              : refreshErr.retryable ? "provider_unavailable" : "authentication_required",
+            cooldownUntil: keepPrevious ? previous.cooldownUntil : cooldownUntil,
+            observedAt: this.now(),
+          };
+          delete state.reservations[this.reservationId];
+        });
+        // Exclude this account from further selection in this pass.
+        refreshExcluded.add(chosen.scope.accountId);
+        // Permanent: skip immediately, don't count toward transient circuit breaker.
+        if (!refreshErr.retryable) continue;
+        // Transient: circuit-break after N consecutive failures.
+        consecutiveTransient++;
+        if (consecutiveTransient >= cap) throw refreshErr;
+      }
     }
-    const changedIdentity =
-      this.scope !== undefined && this.scope.accountId !== chosen.scope.accountId;
-    this.scope = chosen.scope;
-    this.accountId = chosen.account.accountId;
-    this.triedIds.add(chosen.scope.accountId);
-    this.selection = {
-      selectedAccount: chosen.scope.accountId,
-      runtimeModel: chosen.scope.model,
-      rotationCount: (this.selection?.rotationCount ?? 0) + Number(changedIdentity),
-      skipReasons: chosen.skipReasons,
-      basis: chosen.basis,
-      lastFailureClass: this.selection?.lastFailureClass,
-    };
-    setHealthSelection(this.selection);
-    this.creds = await getAccountApiKey(chosen.account.accountId);
-    return this.creds;
   }
 
   async current(): Promise<AntigravityApiKey> {

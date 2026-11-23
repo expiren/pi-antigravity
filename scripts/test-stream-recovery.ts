@@ -3,6 +3,11 @@ import { getEventListeners } from "node:events";
 import type { Api, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
 import { streamAntigravity, _setRotationSleep } from "../src/stream/stream.js";
 import type { CredentialSource } from "../src/runtime/index.js";
+import { OAuthRefreshError } from "../src/auth/oauth.js";
+import { getEventListeners } from "node:events";
+import type { Api, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
+import { streamAntigravity, _setRotationSleep } from "../src/stream/stream.js";
+import type { CredentialSource } from "../src/runtime/index.js";
 
 // A manually advanced clock: deadlines fire only after the exact timer is armed.
 const realSetTimeout = globalThis.setTimeout;
@@ -535,6 +540,47 @@ try {
   // Second backoff: min(100*2^1=200, cap=150) → 150 (before jitter).
   assert(sleepLog[1]! >= 150 && sleepLog[1]! <= 187, `capped backoff: ${sleepLog[1]}`);
   console.log("PASS transient 429 backoff caps at configured maximum");
+
+  // ── OAuth refresh failure propagation ────────────────────────────────
+  {
+    process.env.ANTIGRAVITY_NO_PREWARM = "1";
+    let callNum = 0;
+    const oauthFailSource: CredentialSource = {
+      async current() {
+        callNum++;
+        if (callNum === 1) {
+          throw new OAuthRefreshError(
+            "Antigravity token refresh failed: internal_failure",
+            500,
+            "internal_failure",
+            true,
+          );
+        }
+        return { token: "recovered-token", projectId: "test" };
+      },
+      async rotate() {
+        return undefined;
+      },
+    };
+    const recoveryStream = streamAntigravity(
+      model,
+      { messages: [{ role: "user", content: "test", timestamp: 0 }] },
+      { credentialSource: oauthFailSource, signal: new AbortController().signal },
+    );
+    const recoveryEvents: AssistantMessageEvent[] = [];
+    for await (const event of recoveryStream) {
+      recoveryEvents.push(event);
+    }
+    const errorEvent = recoveryEvents.find((e) => e.type === "error");
+    assert(errorEvent, "stream should emit error when current() throws OAuthRefreshError");
+    assert(errorEvent.type === "error");
+    assert.match(
+      errorEvent.error.errorMessage || "",
+      /internal_failure/,
+      "error message should contain the OAuth error",
+    );
+    console.log("PASS OAuth refresh failure from current() propagates as stream error");
+  }
 
   // Cleanup env overrides for subsequent tests.
   delete process.env.ANTIGRAVITY_STREAM_MAX_TRANSIENT_ROTATIONS;
