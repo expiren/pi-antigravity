@@ -61,41 +61,20 @@ const assert = {
 const route = (model: string, effort?: string) => getAntigravityRequestModelId(model, effort);
 
 const routeCases: Array<[string, string | undefined, string]> = [
-  ["gemini-3.8-flash", undefined, "gemini-3.8-flash-low"],
-  ["gemini-3.8-flash", "off", "gemini-3.8-flash-low"],
-  ["gemini-3.8-flash", "minimal", "gemini-3.8-flash-low"],
-  ["gemini-3.8-flash", "low", "gemini-3.8-flash-low"],
-  ["gemini-3.8-flash", "medium", "gemini-3.8-flash-medium"],
-  ["gemini-3.8-flash", "high", "gemini-3.8-flash-high"],
-  ["gemini-3.8-flash", "xhigh", "gemini-3.8-flash-high"],
-  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "off", "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "low", "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-medium"],
-  ["gemini-3.7-flash", "high", "gemini-3.7-flash-high"],
-  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-high"],
-  ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],
-  ["gemini-3.6-flash", "off", "gemini-3.6-flash-low"],
-  ["gemini-3.6-flash", "minimal", "gemini-3.6-flash-low"],
-  ["gemini-3.6-flash", "low", "gemini-3.6-flash-low"],
-  ["gemini-3.6-flash", "medium", "gemini-3.6-flash-medium"],
-  ["gemini-3.6-flash", "high", "gemini-3.6-flash-high"],
-  ["gemini-3.6-flash", "xhigh", "gemini-3.6-flash-high"],
-  ["gemini-3.5-flash", undefined, "gemini-3.5-flash-extra-low"],
-  ["gemini-3.5-flash", "off", "gemini-3.5-flash-extra-low"],
-  ["gemini-3.5-flash", "minimal", "gemini-3.5-flash-extra-low"],
-  ["gemini-3.5-flash", "low", "gemini-3.5-flash-extra-low"],
-  ["gemini-3.5-flash", "medium", "gemini-3.5-flash-low"],
-  ["gemini-3.5-flash", "high", "gemini-3-flash-agent"],
-  ["gemini-3.5-flash", "xhigh", "gemini-3-flash-agent"],
-  ["gemini-3.1-pro", "medium", "gemini-3.1-pro-low"],
-  ["gemini-3.1-pro", "high", "gemini-pro-agent"],
-  ["gemini-3.1-pro", "xhigh", "gemini-pro-agent"],
-  ["claude-sonnet-4-6", "xhigh", "claude-sonnet-4-6"],
-  ["claude-opus-4-6", "high", "claude-opus-4-6-thinking"],
-  ["gpt-oss-120b", "high", "gpt-oss-120b-medium"],
-  ["unknown-model", "high", "unknown-model"],
+	["gemini-3.8-flash", undefined, "gemini-3.8-flash-low"],
+	["gemini-3.8-flash", "off", "gemini-3.8-flash-low"],
+	["gemini-3.8-flash", "minimal", "gemini-3.8-flash-low"],
+	["gemini-3.8-flash", "low", "gemini-3.8-flash-low"],
+	["gemini-3.8-flash", "medium", "gemini-3.8-flash-medium"],
+	["gemini-3.8-flash", "high", "gemini-3.8-flash-high"],
+	["gemini-3.8-flash", "xhigh", "gemini-3.8-flash-high"],
+	["claude-sonnet-4-6", "xhigh", "claude-sonnet-4-6"],
+	["claude-opus-4-6", "high", "claude-opus-4-6-thinking"],
+	["gpt-oss-120b", "high", "gpt-oss-120b-medium"],
+	// Retired models pass through as-is (no static routing)
+	["gemini-3.7-flash", "low", "gemini-3.7-flash"],
+	["gemini-3.1-pro", "high", "gemini-3.1-pro"],
+	["unknown-model", "high", "unknown-model"],
 ];
 
 for (const [model, effort, expected] of routeCases) {
@@ -104,33 +83,25 @@ for (const [model, effort, expected] of routeCases) {
 
 const modelIds = new Set(ANTIGRAVITY_MODELS.map((model) => model.id));
 const expectedModels = [
-  "gemini-3.8-flash",
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-3.1-pro",
-  "claude-sonnet-4-6",
-  "claude-opus-4-6",
-  "gpt-oss-120b",
+	"gemini-3.8-flash",
+	"claude-opus-4-6",
+	"claude-sonnet-4-6",
+	"gpt-oss-120b",
 ];
 assert.equal(
-  modelIds.size,
-  expectedModels.length,
-  `unexpected model count: ${[...modelIds].join(",")}`,
+	modelIds.size,
+	expectedModels.length,
+	`unexpected model count: ${[...modelIds].join(",")}`,
 );
 for (const expected of expectedModels) {
-  assert.ok(modelIds.has(expected), `missing selectable model: ${expected}`);
+	assert.ok(modelIds.has(expected), `missing selectable model: ${expected}`);
 }
 
 const expectedThinkingLevels: Record<string, string[]> = {
-  "gemini-3.8-flash": ["low", "medium", "high"],
-  "gemini-3.7-flash": ["low", "medium", "high"],
-  "gemini-3.6-flash": ["low", "medium", "high"],
-  "gemini-3.5-flash": ["low", "medium", "high"],
-  "gemini-3.1-pro": ["low", "high"],
-  "claude-opus-4-6": ["high"],
-  "claude-sonnet-4-6": ["high"],
-  "gpt-oss-120b": ["medium"],
+	"gemini-3.8-flash": ["low", "medium", "high"],
+	"claude-opus-4-6": ["high"],
+	"claude-sonnet-4-6": ["high"],
+	"gpt-oss-120b": ["medium"],
 };
 for (const configuredModel of ANTIGRAVITY_MODELS) {
   const map = configuredModel.thinkingLevelMap;
@@ -861,20 +832,12 @@ assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
 assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);
 assert.equal(getMaxOutputTokens("gpt-oss-120b", "gpt-oss-120b-medium"), 32768);
 
-// Test fallback runtime models
-assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-low"), "gemini-3.7-flash-low");
-assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-medium"), "gemini-3.7-flash-medium");
-assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-high"), "gemini-3.7-flash-high");
-assert.equal(getFallbackRuntimeModel("gemini-3.8-flash"), "gemini-3.7-flash-low");
-assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-low"), "gemini-3.6-flash-low");
-assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-medium"), "gemini-3.6-flash-medium");
-assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-high"), "gemini-3.6-flash-high");
-assert.equal(
-  getFallbackRuntimeModel("gemini-3.7-flash-tiered", "medium"),
-  "gemini-3.6-flash-medium",
-);
-assert.equal(getFallbackRuntimeModel("gemini-3.7-flash"), "gemini-3.6-flash-low");
-assert.equal(getFallbackRuntimeModel("gemini-3.6-flash-low"), undefined);
+// Test fallback runtime models — all retired targets removed, everything returns undefined
+assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-low"), undefined);
+assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-medium"), undefined);
+assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-high"), undefined);
+assert.equal(getFallbackRuntimeModel("gemini-3.8-flash"), undefined);
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-low"), undefined);
 assert.equal(getFallbackRuntimeModel("claude-sonnet-4-6"), undefined);
 
 // Test buildRequest output token clamping
@@ -1427,7 +1390,8 @@ assert.match(
   /You are Antigravity/,
 );
 
-const flashCost = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.7-flash")?.cost;
+// Retired gemini-3.7-flash no longer in ANTIGRAVITY_MODELS; verify via costForModelId
+const flashCost = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")?.cost;
 assert.equal(flashCost?.input, 0.75);
 assert.equal(flashCost?.output, 3.75);
 const opusCost = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6")?.cost;
@@ -1512,7 +1476,8 @@ assert.equal(envSubsequentWithOverride.labels.last_execution_id, "custom-id-on-s
 const claudeSonnetModel = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 const claudeOpusModel = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6")!;
 const gptOssModel = ANTIGRAVITY_MODELS.find((m) => m.id === "gpt-oss-120b")!;
-const pro31Model = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.1-pro")!;
+// Retired models: construct inline fixtures instead of ANTIGRAVITY_MODELS lookups
+const pro31Model = { ...model, id: "gemini-3.1-pro", maxTokens: 65535 } as typeof model;
 
 const reqFlash38 = buildRequest(
   ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
@@ -1575,7 +1540,7 @@ assert.ok(reqChatB_2.request.labels?.last_execution_id);
 assert.notEqual(reqChatA_2.request.labels?.last_execution_id, reqChatB_2.request.labels?.last_execution_id);
 
 const reqFlash36 = buildRequest(
-  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.6-flash")!,
+  { ...model, id: "gemini-3.6-flash" } as typeof model,
   dummyContext,
   "test-proj",
   {},

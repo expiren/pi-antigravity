@@ -10,7 +10,7 @@ import { DEFAULT_ENDPOINT, fetchAvailableModelsCatalog, parseApiKey } from "../c
 import { ANTIGRAVITY_API } from "../types/types.js";
 import { costForModelId, type PricingResolver } from "./pricing.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
-import { buildAntigravityCatalog, isDisabledModel, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
+import { buildAntigravityCatalog, isDisabledModel, isExcludedModel, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
 import {
   ANTIGRAVITY_IMAGE_API,
   buildAntigravityImageModels,
@@ -57,7 +57,7 @@ export function hydrateAntigravityCatalog(stored: unknown): number {
   if (!isRecord(persisted)) return 0;
 
   if (isStringMap(persisted.modelEnums)) restoreDynamicModelEnums(persisted.modelEnums);
-  if (isCatalog(persisted.catalog)) applyAntigravityCatalog(stripDisabledModels(persisted.catalog));
+  if (isCatalog(persisted.catalog)) applyAntigravityCatalog(stripUnavailableModels(persisted.catalog));
   return typeof persisted.checkedAt === "number" && persisted.checkedAt > 0
     ? persisted.checkedAt
     : 0;
@@ -156,14 +156,24 @@ function apiKeyFromCredential(credential: Credential | undefined): string | unde
   return undefined;
 }
 
-/** Drop disabled placeholder models from a stale persisted catalog. */
-function stripDisabledModels(catalog: AntigravityCatalog): AntigravityCatalog {
-  const models = catalog.models.filter((m) => !isDisabledModel(m.id));
-  const routing: Record<string, AntigravityCatalog["routing"][string]> = {};
-  for (const m of models) {
-    if (catalog.routing[m.id]) routing[m.id] = catalog.routing[m.id];
-  }
-  return { models, routing, imageModels: catalog.imageModels };
+/** Retired public IDs that should not survive in stale caches. */
+const RETIRED_MODEL_IDS = new Set([
+	"gemini-3.1-pro",
+	"gemini-3.5-flash",
+	"gemini-3.6-flash",
+	"gemini-3.7-flash",
+]);
+
+/** Drop disabled, retired, and tier-gated models from a stale persisted catalog. */
+function stripUnavailableModels(catalog: AntigravityCatalog): AntigravityCatalog {
+	const models = catalog.models.filter(
+		(m) => !isDisabledModel(m.id) && !RETIRED_MODEL_IDS.has(m.id) && !isExcludedModel(m.id),
+	);
+	const routing: Record<string, AntigravityCatalog["routing"][string]> = {};
+	for (const m of models) {
+		if (catalog.routing[m.id]) routing[m.id] = catalog.routing[m.id];
+	}
+	return { models, routing, imageModels: catalog.imageModels };
 }
 
 function toStoredModels(models: ProviderModelConfig[]): AnyModel[] {

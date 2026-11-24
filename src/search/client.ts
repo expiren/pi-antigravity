@@ -19,17 +19,21 @@ import type {
 export const DEFAULT_SEARCH_MODEL = "gemini-3.8-flash-tiered";
 
 export function resolveSearchModel(customModel?: string): string {
-  const envModel = process.env.ANTIGRAVITY_SEARCH_MODEL?.trim();
-  const raw = customModel?.trim() || envModel || DEFAULT_SEARCH_MODEL;
-  if (
-    raw === "gemini-3.8-flash" ||
-    raw === "gemini-3.7-flash" ||
-    raw === "gemini-3.7-flash-tiered" ||
-    raw === "gemini-3.7-flash-low"
-  ) {
-    return "gemini-3.8-flash-tiered";
-  }
-  return raw;
+	const envModel = process.env.ANTIGRAVITY_SEARCH_MODEL?.trim();
+	const raw = customModel?.trim() || envModel || DEFAULT_SEARCH_MODEL;
+	// Redirect retired model IDs to the current live search model.
+	if (
+		raw === "gemini-3.8-flash" ||
+		raw === "gemini-3.7-flash" ||
+		raw === "gemini-3.7-flash-tiered" ||
+		raw === "gemini-3.7-flash-low" ||
+		raw === "gemini-3.6-flash" ||
+		raw === "gemini-3.5-flash" ||
+		raw === "gemini-3.1-pro"
+	) {
+		return "gemini-3.8-flash-tiered";
+	}
+	return raw;
 }
 
 const SEARCH_MODEL_FALLBACKS = [

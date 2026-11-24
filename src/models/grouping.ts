@@ -42,11 +42,7 @@ const DISPLAY_LEVELS: Array<{ pattern: RegExp; level: ThinkingLevel }> = [
   { pattern: /\(\s*low\s*\)/i, level: ThinkingEffort.Low },
 ];
 
-/** Known backend aliases whose runtime IDs do not share a thinking suffix with the public family. */
-const RUNTIME_ALIASES: Record<string, { publicId: string; level: ThinkingLevel }> = {
-  "gemini-3-flash-agent": { publicId: "gemini-3.5-flash", level: ThinkingEffort.High },
-  "gemini-pro-agent": { publicId: "gemini-3.1-pro", level: ThinkingEffort.High },
-};
+const RUNTIME_ALIASES: Record<string, { publicId: string; level: ThinkingLevel }> = {};
 
 const PI_LEVELS = [
   ThinkingEffort.Off,
@@ -81,6 +77,15 @@ export function isDisabledModel(id: string, info?: ModelInfoRaw): boolean {
   if (info?.disabled === true) return true;
   if (/-disabled$/i.test(id)) return true;
   return false;
+}
+
+/** IDs advertised in fetchAvailableModels but unusable on starter-tier account pools. */
+const TIER_GATED_MODEL_IDS = new Set(["gemini-2.5-pro"]);
+
+/** Returns true for models that should be hidden from the catalog on starter-tier pools. */
+export function isExcludedModel(id: string): boolean {
+	if (process.env.PI_ANTIGRAVITY_ALLOW_BLOCKED_MODELS === "1") return false;
+	return TIER_GATED_MODEL_IDS.has(id);
 }
 
 export function resolvedCatalog(
@@ -136,6 +141,7 @@ export function buildAntigravityCatalog(
   const routing: Record<string, AntigravityRouting> = {};
 
   for (const group of groups.values()) {
+    if (isExcludedModel(group.publicId)) continue;
     const fallbackModel = fallback.models.find((model) => model.id === group.publicId);
     const fallbackRouting = fallback.routing[group.publicId];
     if (fallbackModel && fallbackRouting) {
@@ -149,13 +155,6 @@ export function buildAntigravityCatalog(
     routing[group.publicId] = synthesized.routing;
   }
 
-  for (const fallbackModel of fallback.models) {
-    if (routing[fallbackModel.id]) continue;
-    const fallbackRouting = fallback.routing[fallbackModel.id];
-    if (!fallbackRouting) continue;
-    models.push(fallbackModel);
-    routing[fallbackModel.id] = fallbackRouting;
-  }
 
   models.sort(comparePublicModels);
   return { models, routing };

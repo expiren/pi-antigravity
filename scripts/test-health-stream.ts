@@ -130,27 +130,28 @@ await fixture(async (f) => {
 });
 console.log("PASS hard quota and empty stream share one account-change budget");
 
+// With retired fallback models removed, a 404 on the only runtime candidate
+// is a terminal error that stops without account rotation.
 await fixture(async (f) => {
   const primary = "gemini-3.8-flash";
-  const fallback = "gemini-3.7-flash-low";
   process.env.ANTIGRAVITY_RUNTIME_MODEL = primary;
-  f.cool([account(0)], fallback);
-  f.cool([account(1)], primary);
   const models: string[] = [];
   const result = await request(f, (_token, attempt, init) => {
     const body = JSON.parse(String(init.body));
-    models.push(body.model);
+    if (body.model) models.push(body.model);
+    // First call: 404 on stream endpoint.  Second call: fetchAvailableRuntimeModel
+    // receives the same mock — it won't match the discovery format, so the
+    // stream surfaces the 404 as a terminal error.
     return attempt === 1 ? new Response("Unknown model", { status: 404 }) : success();
   });
-  assert.deepEqual(result.attempted, ["fake-access-0", "fake-access-1"]);
-  assert.deepEqual(models, [primary, fallback]);
-  const records = Object.values(f.store.snapshot().records);
-  assert.equal(records.filter((r) => r.status === "hard_quota").length, 2);
-  assert(records.some((r) => r.model === fallback && r.lastSuccessAt === f.now));
-  assert.equal(getLastDiagnostics().healthSelection?.rotationCount, 1);
+  // The 404 is not retried across accounts — only one token is attempted.
+  assert.equal(result.attempted.length, 2); // 1 stream + 1 dynamic discovery
+  assert.deepEqual(models, [primary]); // only the primary model was sent
+  const errorEvent = result.events.find((e) => e.type === "error");
+  assert.ok(errorEvent, "404 should produce an error event");
 });
 console.log(
-  "PASS runtime fallback reselects using actual model scope and stable rotation identity",
+  "PASS 404 on sole runtime candidate surfaces as terminal error without rotation",
 );
 
 await fixture(async (f) => {

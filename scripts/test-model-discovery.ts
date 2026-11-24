@@ -13,6 +13,7 @@ import {
   getModelEnum,
   hydrateAntigravityCatalog,
   isDisabledModel,
+  isExcludedModel,
   refreshAntigravityModels,
   registerModelEnum,
   listProviderModels,
@@ -233,7 +234,8 @@ try {
   );
   const price = (id: string) => ANTIGRAVITY_MODELS.find((model) => model.id === id)?.cost;
   assert(price("gemini-3.8-flash")?.input === 0.75, "Gemini 3.8 Flash price");
-  assert(price("gemini-3.5-flash")?.input === 1.5, "Gemini 3.5 Flash price");
+  // gemini-3.5-flash removed from ANTIGRAVITY_MODELS (retired); verify via costForModelId
+  assert(price("gemini-3.5-flash") === undefined, "Retired gemini-3.5-flash not in static seeds");
   assert(price("claude-opus-4-6")?.input === 5, "Claude Opus 4.6 price");
   assert(price("claude-sonnet-4-6")?.output === 15, "Claude Sonnet 4.6 price");
   for (const level of ["low", "medium", "high"] as const) {
@@ -367,5 +369,70 @@ assert(
 );
 resetAntigravityCatalogForTests();
 
+// ── Tier-gated (excluded) model filtering ──
+
+assert(isExcludedModel("gemini-2.5-pro"), "gemini-2.5-pro is excluded on starter pools");
+assert(!isExcludedModel("gemini-3.8-flash"), "active models are not excluded");
+assert(!isExcludedModel("gemini-4-hydrogen-sonar"), "preview models are not excluded");
+
+// env override bypasses the exclusion
+process.env.PI_ANTIGRAVITY_ALLOW_BLOCKED_MODELS = "1";
+assert(!isExcludedModel("gemini-2.5-pro"), "env override unblocks gemini-2.5-pro");
+delete process.env.PI_ANTIGRAVITY_ALLOW_BLOCKED_MODELS;
+assert(isExcludedModel("gemini-2.5-pro"), "exclusion restored after env removal");
+
+// buildAntigravityCatalog drops excluded models from discovered groups
+const excludedCatalog = buildAntigravityCatalog(
+  {
+    "gemini-2.5-pro-low": info("Gemini 2.5 Pro (Low)"),
+    "gemini-3.9-flash-low": info("Gemini 3.9 Flash (Low)"),
+  },
+  fallback,
+);
+assert(
+  !excludedCatalog.models.some((m) => m.id === "gemini-2.5-pro"),
+  "gemini-2.5-pro excluded from catalog build",
+);
+assert(
+  excludedCatalog.models.some((m) => m.id === "gemini-3.9-flash"),
+  "non-excluded models still in catalog",
+);
+
+// ── Undiscovered fallback models are NOT re-injected ──
+
+// When discovery returns real models, static seeds that were NOT discovered
+// should not appear in the catalog (previous behavior injected them).
+const discoveryOnly = buildAntigravityCatalog(
+  {
+    "gemini-99.0-flash-low": info("Gemini 99.0 Flash (Low)"),
+  },
+  fallback,
+);
+assert(
+  discoveryOnly.models.some((m) => m.id === "gemini-99.0-flash"),
+  "discovered model is in catalog",
+);
+// Static seeds like gemini-3.8-flash should NOT appear because they were not discovered
+assert(
+  !discoveryOnly.models.some((m) => m.id === "gemini-3.8-flash"),
+  "undiscovered static seed gemini-3.8-flash not re-injected",
+);
+assert(
+  !discoveryOnly.models.some((m) => m.id === "claude-opus-4-6"),
+  "undiscovered static seed claude-opus-4-6 not re-injected",
+);
+
+// Retired model IDs are not in ANTIGRAVITY_MODELS or ANTIGRAVITY_ROUTING
+for (const retired of ["gemini-3.1-pro", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"]) {
+  assert(
+    !ANTIGRAVITY_MODELS.some((m) => m.id === retired),
+    `${retired} not in ANTIGRAVITY_MODELS`,
+  );
+  assert(
+    !ANTIGRAVITY_ROUTING[retired],
+    `${retired} not in ANTIGRAVITY_ROUTING`,
+  );
+}
+resetAntigravityCatalogForTests();
 
 console.log("model discovery: persisted offline catalog, dynamic enums, and TTL passed");
