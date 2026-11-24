@@ -10,7 +10,7 @@ import { DEFAULT_ENDPOINT, fetchAvailableModelsCatalog, parseApiKey } from "../c
 import { ANTIGRAVITY_API } from "../types/types.js";
 import { costForModelId, type PricingResolver } from "./pricing.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
-import { buildAntigravityCatalog, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
+import { buildAntigravityCatalog, isDisabledModel, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
 import {
   ANTIGRAVITY_IMAGE_API,
   buildAntigravityImageModels,
@@ -57,7 +57,7 @@ export function hydrateAntigravityCatalog(stored: unknown): number {
   if (!isRecord(persisted)) return 0;
 
   if (isStringMap(persisted.modelEnums)) restoreDynamicModelEnums(persisted.modelEnums);
-  if (isCatalog(persisted.catalog)) applyAntigravityCatalog(persisted.catalog);
+  if (isCatalog(persisted.catalog)) applyAntigravityCatalog(stripDisabledModels(persisted.catalog));
   return typeof persisted.checkedAt === "number" && persisted.checkedAt > 0
     ? persisted.checkedAt
     : 0;
@@ -154,6 +154,16 @@ function apiKeyFromCredential(credential: Credential | undefined): string | unde
     return getApiKey(credential);
   }
   return undefined;
+}
+
+/** Drop disabled placeholder models from a stale persisted catalog. */
+function stripDisabledModels(catalog: AntigravityCatalog): AntigravityCatalog {
+  const models = catalog.models.filter((m) => !isDisabledModel(m.id));
+  const routing: Record<string, AntigravityCatalog["routing"][string]> = {};
+  for (const m of models) {
+    if (catalog.routing[m.id]) routing[m.id] = catalog.routing[m.id];
+  }
+  return { models, routing, imageModels: catalog.imageModels };
 }
 
 function toStoredModels(models: ProviderModelConfig[]): AnyModel[] {

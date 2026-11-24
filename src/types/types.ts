@@ -277,6 +277,7 @@ export type QuotaSummaryRaw = {
 };
 
 export type ModelInfoRaw = {
+  disabled?: unknown;
   isInternal?: unknown;
   displayName?: unknown;
   label?: unknown;

@@ -9,8 +9,10 @@ import {
   clearModelEnumCache,
   costForModelId,
   getAntigravityRequestModelId,
+  getCurrentAntigravityCatalog,
   getModelEnum,
   hydrateAntigravityCatalog,
+  isDisabledModel,
   refreshAntigravityModels,
   registerModelEnum,
   listProviderModels,
@@ -272,5 +274,98 @@ assert(
   !("Accept" in antigravityHeaders("test-token")),
   "discovery must not inject an Accept header",
 );
+
+// ── Disabled model filtering ──
+
+// isDisabledModel: info.disabled === true excluded even without -disabled suffix
+assert(isDisabledModel("gemini-4-hydrogen", { disabled: true }), "disabled flag rejects model");
+assert(!isDisabledModel("gemini-4-hydrogen-sonar"), "non-disabled ID without info passes");
+assert(!isDisabledModel("gemini-4-hydrogen-sonar", {}), "non-disabled ID with empty info passes");
+
+// isDisabledModel: -disabled IDs excluded even without disabled flag in info
+assert(isDisabledModel("gemini-4-argon-disabled"), "disabled suffix rejects without info");
+assert(isDisabledModel("gemini-4-argon-disabled", {}), "disabled suffix rejects with empty info");
+assert(isDisabledModel("gemini-4-carbon-disabled", { disabled: false }), "disabled suffix overrides false flag");
+
+// buildAntigravityCatalog excludes disabled models from groups
+const disabledCatalog = buildAntigravityCatalog(
+  {
+    "gemini-4-argon-disabled": info("Gemini 4 Argon (Disabled)", { disabled: true }),
+    "gemini-4-carbon-disabled": info("Gemini 4 Carbon (Disabled)"),
+    "gemini-4-hydrogen-disabled": info("Gemini 4 Hydrogen (Disabled)", { disabled: true }),
+    "gemini-4-neon-disabled": info("Gemini 4 Neon (Disabled)", { disabled: true }),
+    "gemini-4-hydrogen-sonar": { supportsThinking: true, supportsImages: true },
+    "gemini-3.9-flash-low": info("Gemini 3.9 Flash (Low)"),
+  },
+  fallback,
+);
+assert(
+  !disabledCatalog.models.some((m) => /-disabled/i.test(m.id)),
+  "no -disabled models in catalog",
+);
+assert(
+  disabledCatalog.models.some((m) => m.id === "gemini-4-hydrogen-sonar"),
+  "gemini-4-hydrogen-sonar is included as selectable",
+);
+const sonar = disabledCatalog.models.find((m) => m.id === "gemini-4-hydrogen-sonar");
+assert(
+  sonar?.name === "Gemini 4 Hydrogen Sonar (Antigravity)",
+  "gemini-4-hydrogen-sonar gets clean display name",
+);
+assert(
+  disabledCatalog.models.some((m) => m.id === "gemini-3.9-flash"),
+  "non-disabled models still grouped normally",
+);
+
+// info.disabled: true excluded even on IDs without -disabled suffix
+const flagOnlyCatalog = buildAntigravityCatalog(
+  {
+    "gemini-4-hydrogen": info("Gemini 4 Hydrogen", { disabled: true }),
+    "gemini-3.9-flash-low": info("Gemini 3.9 Flash (Low)"),
+  },
+  fallback,
+);
+assert(
+  !flagOnlyCatalog.models.some((m) => m.id === "gemini-4-hydrogen"),
+  "disabled flag without suffix still excluded",
+);
+
+// Stale cached catalog with -disabled entries gets cleaned during hydration
+resetAntigravityCatalogForTests();
+const staleCatalog: AntigravityCatalog = buildAntigravityCatalog(
+  {
+    "gemini-3.9-flash-low": info("Gemini 3.9 Flash (Low)"),
+  },
+  fallback,
+);
+// Inject a stale -disabled model that slipped into an older persisted catalog
+staleCatalog.models.push({
+  id: "gemini-4-argon-disabled",
+  name: "Gemini 4 Argon Disabled (Antigravity)",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 128000,
+  maxTokens: 8192,
+});
+staleCatalog.routing["gemini-4-argon-disabled"] = { defaultRequestId: "gemini-4-argon-disabled" };
+hydrateAntigravityCatalog({
+  [ANTIGRAVITY_PERSIST_KEY]: {
+    catalog: staleCatalog,
+    checkedAt: Date.now(),
+    modelEnums: {},
+  },
+});
+const afterHydrate = getCurrentAntigravityCatalog();
+assert(
+  !afterHydrate.models.some((m) => /-disabled/i.test(m.id)),
+  "hydration strips stale -disabled models from persisted catalog",
+);
+assert(
+  afterHydrate.models.some((m) => m.id === "gemini-3.9-flash"),
+  "hydration preserves non-disabled models from persisted catalog",
+);
+resetAntigravityCatalogForTests();
+
 
 console.log("model discovery: persisted offline catalog, dynamic enums, and TTL passed");

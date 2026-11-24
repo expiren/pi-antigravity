@@ -76,6 +76,13 @@ export function isSelectableRuntimeModelId(id: string): boolean {
   return true;
 }
 
+/** Backend marks unavailable models with `disabled: true` and/or a `-disabled` ID suffix. */
+export function isDisabledModel(id: string, info?: ModelInfoRaw): boolean {
+  if (info?.disabled === true) return true;
+  if (/-disabled$/i.test(id)) return true;
+  return false;
+}
+
 export function resolvedCatalog(
   discovered: AntigravityCatalog | undefined,
   current: AntigravityCatalog,
@@ -99,6 +106,7 @@ export function buildAntigravityCatalog(
   for (const [runtimeId, info] of Object.entries(rawModels)) {
     if (!isSelectableRuntimeModelId(runtimeId)) continue;
     if (info?.isInternal) continue;
+    if (isDisabledModel(runtimeId, info)) continue;
 
     const displayName = modelDisplayName(info);
     if (runtimeId.endsWith("-tiered")) {
