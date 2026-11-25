@@ -4,10 +4,11 @@ import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityCatalog } from "./grouping.js";
 import { ANTIGRAVITY_IMAGE_MODELS } from "./image-catalog.js";
 import {
-	claudeOpusCost,
-	claudeSonnetCost,
-	gemini38FlashCost,
-	gptOssCost,
+  claudeOpusCost,
+  claudeSonnetCost,
+  gemini38FlashCost,
+  gemini4HydrogenCost,
+  gptOssCost,
 } from "./pricing.js";
 
 export const PROVIDER_ID = "antigravity";
@@ -58,6 +59,17 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
     },
     defaultRequestId: "gemini-3.8-flash-low",
   },
+  "gemini-4-hydrogen": {
+    off: "gemini-4-hydrogen-low",
+    routing: {
+      minimal: "gemini-4-hydrogen-low",
+      low: "gemini-4-hydrogen-low",
+      medium: "gemini-4-hydrogen-medium",
+      high: "gemini-4-hydrogen-high",
+      xhigh: "gemini-4-hydrogen-xhigh",
+    },
+    defaultRequestId: "gemini-4-hydrogen-low",
+  },
   "gpt-oss-120b": {
     off: "gpt-oss-120b-medium",
     routing: {
@@ -79,6 +91,15 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   "gemini-3.8-flash-low": 65536,
   "gemini-3.8-flash-medium": 65536,
   "gemini-3.8-flash-high": 65536,
+  // Gemini 4 Hydrogen
+  "gemini-4-hydrogen": 262144,
+  "gemini-4-hydrogen-low": 262144,
+  "gemini-4-hydrogen-medium": 262144,
+  "gemini-4-hydrogen-high": 262144,
+  "gemini-4-hydrogen-xhigh": 262144,
+  "gemini-4-hydrogen-tiered-high": 262144,
+  "gemini-4-hydrogen-tiered-xhigh": 262144,
+  "gemini-4-hydrogen-sonar": 65536,
   "gemini-3.7-flash": 65536,
   "gemini-3.7-flash-tiered": 65536,
   // Retain rollout-era IDs for compatibility with pinned runtime overrides.
@@ -159,6 +180,15 @@ const thinkingLevelMaps = {
     xhigh: null,
     max: null,
   },
+  lowMediumHighXhigh: {
+    off: null,
+    minimal: null,
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: null,
+  },
   lowHigh: {
     off: null,
     minimal: null,
@@ -203,6 +233,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: gemini38FlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
+  },
+  {
+    id: "gemini-4-hydrogen",
+    name: "Gemini 4 Hydrogen (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHighXhigh,
+    input: ["text", "image"],
+    inputLimits: geminiInputLimits,
+    cost: gemini4HydrogenCost,
+    contextWindow: 1048576,
+    maxTokens: 262144,
   },
   {
     id: "claude-opus-4-6",
@@ -312,12 +353,12 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
  * gemini-3.8-flash has no same-generation fallback.
  */
 export function getFallbackRuntimeModel(
-	_runtimeModel: string,
-	_effort?: string,
+  _runtimeModel: string,
+  _effort?: string,
 ): string | undefined {
-	// All prior fallback targets (gemini-3.7-flash, gemini-3.6-flash) are retired.
-	// gemini-3.8-flash is the only live Gemini Flash; no cross-generation fallback.
-	return undefined;
+  // All prior fallback targets (gemini-3.7-flash, gemini-3.6-flash) are retired.
+  // gemini-3.8-flash is the only live Gemini Flash; no cross-generation fallback.
+  return undefined;
 }
 
 export type { ThinkingWire };
@@ -329,6 +370,15 @@ export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
   "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
   "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
   "gemini-3.8-flash-tiered": "MODEL_PLACEHOLDER_M322",
+  // Gemini 4 Hydrogen
+  "gemini-4-hydrogen": "MODEL_PLACEHOLDER_M525",
+  "gemini-4-hydrogen-high": "MODEL_PLACEHOLDER_M525",
+  "gemini-4-hydrogen-medium": "MODEL_PLACEHOLDER_M526",
+  "gemini-4-hydrogen-low": "MODEL_PLACEHOLDER_M527",
+  "gemini-4-hydrogen-xhigh": "MODEL_PLACEHOLDER_M528",
+  "gemini-4-hydrogen-tiered-high": "MODEL_PLACEHOLDER_M530",
+  "gemini-4-hydrogen-tiered-xhigh": "MODEL_PLACEHOLDER_M531",
+  "gemini-4-hydrogen-sonar": "MODEL_PLACEHOLDER_M578",
   // Gemini 3.7 Flash
   "gemini-3.7-flash": "MODEL_PLACEHOLDER_M298",
   "gemini-3.7-flash-high": "MODEL_PLACEHOLDER_M298",

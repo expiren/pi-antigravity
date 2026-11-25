@@ -68,6 +68,12 @@ const routeCases: Array<[string, string | undefined, string]> = [
 	["gemini-3.8-flash", "medium", "gemini-3.8-flash-medium"],
 	["gemini-3.8-flash", "high", "gemini-3.8-flash-high"],
 	["gemini-3.8-flash", "xhigh", "gemini-3.8-flash-high"],
+	["gemini-4-hydrogen", undefined, "gemini-4-hydrogen-low"],
+	["gemini-4-hydrogen", "off", "gemini-4-hydrogen-low"],
+	["gemini-4-hydrogen", "low", "gemini-4-hydrogen-low"],
+	["gemini-4-hydrogen", "medium", "gemini-4-hydrogen-medium"],
+	["gemini-4-hydrogen", "high", "gemini-4-hydrogen-high"],
+	["gemini-4-hydrogen", "xhigh", "gemini-4-hydrogen-xhigh"],
 	["claude-sonnet-4-6", "xhigh", "claude-sonnet-4-6"],
 	["claude-opus-4-6", "high", "claude-opus-4-6-thinking"],
 	["gpt-oss-120b", "high", "gpt-oss-120b-medium"],
@@ -84,6 +90,7 @@ for (const [model, effort, expected] of routeCases) {
 const modelIds = new Set(ANTIGRAVITY_MODELS.map((model) => model.id));
 const expectedModels = [
 	"gemini-3.8-flash",
+	"gemini-4-hydrogen",
 	"claude-opus-4-6",
 	"claude-sonnet-4-6",
 	"gpt-oss-120b",
@@ -99,6 +106,7 @@ for (const expected of expectedModels) {
 
 const expectedThinkingLevels: Record<string, string[]> = {
 	"gemini-3.8-flash": ["low", "medium", "high"],
+	"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
 	"claude-opus-4-6": ["high"],
 	"claude-sonnet-4-6": ["high"],
 	"gpt-oss-120b": ["medium"],
@@ -831,6 +839,9 @@ assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 655
 assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
 assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);
 assert.equal(getMaxOutputTokens("gpt-oss-120b", "gpt-oss-120b-medium"), 32768);
+assert.equal(getMaxOutputTokens("gemini-4-hydrogen", "gemini-4-hydrogen-high"), 262144);
+assert.equal(getMaxOutputTokens("gemini-4-hydrogen", "gemini-4-hydrogen-xhigh"), 262144);
+assert.equal(getMaxOutputTokens("gemini-4-hydrogen", "gemini-4-hydrogen-sonar"), 65536);
 
 // Test fallback runtime models — all retired targets removed, everything returns undefined
 assert.equal(getFallbackRuntimeModel("gemini-3.8-flash-low"), undefined);

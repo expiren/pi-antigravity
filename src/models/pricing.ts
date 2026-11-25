@@ -25,6 +25,12 @@ export const gemini4ArgonCost: ModelCost = {
   cacheRead: 0.1,
   cacheWrite: 0,
 };
+export const gemini4HydrogenCost: ModelCost = {
+  input: 1.5,
+  output: 7.5,
+  cacheRead: 0.15,
+  cacheWrite: 0,
+};
 export const gemini38FlashCost: ModelCost = {
   input: 0.75,
   output: 3.75,
@@ -66,6 +72,7 @@ export const gptOssCost: ModelCost = { input: 0.6, output: 2.4, cacheRead: 0.15,
 
 /** First match wins, so specific IDs go first. */
 const STATIC_COST_RULES: Array<[RegExp, ModelCost]> = [
+  [/^gemini-4-hydrogen/i, gemini4HydrogenCost],
   [/^gemini-4-argon/i, gemini4ArgonCost],
   [/^gemini-.*flash-lite/i, geminiFlashLiteCost],
   [/^gemini-3\.5-flash/i, gemini35FlashCost],

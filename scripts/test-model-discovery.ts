@@ -238,6 +238,9 @@ try {
   assert(price("gemini-3.5-flash") === undefined, "Retired gemini-3.5-flash not in static seeds");
   assert(price("claude-opus-4-6")?.input === 5, "Claude Opus 4.6 price");
   assert(price("claude-sonnet-4-6")?.output === 15, "Claude Sonnet 4.6 price");
+  assert(price("gemini-4-hydrogen")?.input === 1.5, "Gemini 4 Hydrogen price input");
+  assert(price("gemini-4-hydrogen")?.output === 7.5, "Gemini 4 Hydrogen price output");
+  assert(price("gemini-4-hydrogen")?.cacheRead === 0.15, "Gemini 4 Hydrogen price cacheRead");
   for (const level of ["low", "medium", "high"] as const) {
     const runtimeId = `gemini-4-argon-${level}`;
     assert(argon.thinkingLevelMap?.[level] === level, `Argon advertises ${level}`);
@@ -433,6 +436,47 @@ for (const retired of ["gemini-3.1-pro", "gemini-3.5-flash", "gemini-3.6-flash",
     `${retired} not in ANTIGRAVITY_ROUTING`,
   );
 }
+
+// ── Gemini 4 Hydrogen: tiered-variant key-order invariant ──
+
+// Discovery lists -tiered-<level> BEFORE the non-tiered primary.  The non-tiered
+// primary must overwrite the slot so routing hits the primary runtime ID.
+const hydrogenCatalog = buildAntigravityCatalog(
+  {
+    "gemini-4-hydrogen-tiered-xhigh": info("Gemini 4 Hydrogen (XHigh)"),
+    "gemini-4-hydrogen-xhigh": info("Gemini 4 Hydrogen (XHigh)"),
+    "gemini-4-hydrogen-tiered-high": info("Gemini 4 Hydrogen (High)"),
+    "gemini-4-hydrogen-high": info("Gemini 4 Hydrogen (High)"),
+    "gemini-4-hydrogen-medium": info("Gemini 4 Hydrogen (Medium)"),
+    "gemini-4-hydrogen-low": info("Gemini 4 Hydrogen (Low)"),
+    "gemini-4-hydrogen-sonar": info("Gemini 4 Hydrogen Sonar"),
+  },
+  fallback,
+);
+applyAntigravityCatalog(hydrogenCatalog);
+
+const h4 = hydrogenCatalog.models.find((m) => m.id === "gemini-4-hydrogen");
+assert(h4, "hydrogen groups into gemini-4-hydrogen");
+assert(h4.maxTokens === 262144, "hydrogen inherits 262144 maxTokens from static seed");
+
+// Non-tiered primary must own the slot (overwrites -tiered- variant).
+assert(
+  getAntigravityRequestModelId("gemini-4-hydrogen", "xhigh") === "gemini-4-hydrogen-xhigh",
+  "non-tiered xhigh overwrites tiered-xhigh",
+);
+assert(
+  getAntigravityRequestModelId("gemini-4-hydrogen", "high") === "gemini-4-hydrogen-high",
+  "non-tiered high overwrites tiered-high",
+);
+assert(
+  getAntigravityRequestModelId("gemini-4-hydrogen", "low") === "gemini-4-hydrogen-low",
+  "hydrogen routes low",
+);
+
+// Sonar is a separate selectable model (no displayName family match).
+const h4Sonar = hydrogenCatalog.models.find((m) => m.id === "gemini-4-hydrogen-sonar");
+assert(h4Sonar, "sonar is an independent selectable model");
+
 resetAntigravityCatalogForTests();
 
 console.log("model discovery: persisted offline catalog, dynamic enums, and TTL passed");

@@ -26,6 +26,7 @@ const THINKING_SUFFIXES: Array<{ suffix: string; level: ThinkingLevel }> = [
   { suffix: "extra-low", level: ThinkingEffort.Low },
   { suffix: "extra-high", level: ThinkingEffort.Xhigh },
   { suffix: "thinking", level: ThinkingEffort.High },
+  { suffix: "xhigh", level: ThinkingEffort.Xhigh },
   { suffix: "minimal", level: ThinkingEffort.Minimal },
   { suffix: "medium", level: ThinkingEffort.Medium },
   { suffix: "high", level: ThinkingEffort.High },
@@ -36,6 +37,7 @@ const DISPLAY_LEVELS: Array<{ pattern: RegExp; level: ThinkingLevel }> = [
   { pattern: /\(\s*extra\s*low\s*\)/i, level: ThinkingEffort.Low },
   { pattern: /\(\s*extra\s*high\s*\)/i, level: ThinkingEffort.Xhigh },
   { pattern: /\(\s*thinking\s*\)/i, level: ThinkingEffort.High },
+  { pattern: /\(\s*xhigh\s*\)/i, level: ThinkingEffort.Xhigh },
   { pattern: /\(\s*minimal\s*\)/i, level: ThinkingEffort.Minimal },
   { pattern: /\(\s*medium\s*\)/i, level: ThinkingEffort.Medium },
   { pattern: /\(\s*high\s*\)/i, level: ThinkingEffort.High },
@@ -84,8 +86,8 @@ const TIER_GATED_MODEL_IDS = new Set(["gemini-2.5-pro"]);
 
 /** Returns true for models that should be hidden from the catalog on starter-tier pools. */
 export function isExcludedModel(id: string): boolean {
-	if (process.env.PI_ANTIGRAVITY_ALLOW_BLOCKED_MODELS === "1") return false;
-	return TIER_GATED_MODEL_IDS.has(id);
+  if (process.env.PI_ANTIGRAVITY_ALLOW_BLOCKED_MODELS === "1") return false;
+  return TIER_GATED_MODEL_IDS.has(id);
 }
 
 export function resolvedCatalog(
@@ -124,13 +126,24 @@ export function buildAntigravityCatalog(
 
     const alias = RUNTIME_ALIASES[runtimeId];
     const suffix = alias ? undefined : parseThinkingSuffix(runtimeId);
-    const publicId = alias?.publicId ?? suffix?.baseId ?? runtimeId;
+    let publicId = alias?.publicId ?? suffix?.baseId ?? runtimeId;
+    // *-tiered-<level>: strip "-tiered" so publicId stays the base family.
+    if (suffix && publicId.endsWith("-tiered")) {
+      publicId = publicId.slice(0, -"-tiered".length);
+    }
     const group = ensureGroup(groups, publicId);
     absorbMetadata(group, info, displayName);
 
     const level = alias?.level ?? levelFromDisplayName(displayName) ?? suffix?.level;
-    if (level) group.variants[level] = runtimeId;
-    else group.unsuffixed = runtimeId;
+    if (level) {
+      // A -tiered-<level> variant fills the slot only when no primary variant owns it yet.
+      const isTieredVariant = suffix && suffix.baseId.endsWith("-tiered");
+      if (!isTieredVariant || !group.variants[level]) {
+        group.variants[level] = runtimeId;
+      }
+    } else {
+      group.unsuffixed = runtimeId;
+    }
   }
 
   mergeAgentSingletons(groups);
@@ -154,7 +167,6 @@ export function buildAntigravityCatalog(
     models.push(synthesized.model);
     routing[group.publicId] = synthesized.routing;
   }
-
 
   models.sort(comparePublicModels);
   return { models, routing };
@@ -238,7 +250,7 @@ function modelDisplayName(info: ModelInfoRaw | undefined): string | undefined {
 function displayFamily(displayName: string | undefined): string | undefined {
   if (!displayName) return undefined;
   return displayName
-    .replace(/\s*\((?:extra\s*low|extra\s*high|low|medium|high|minimal|thinking)\)\s*$/i, "")
+    .replace(/\s*\((?:extra\s*low|extra\s*high|low|medium|high|xhigh|minimal|thinking)\)\s*$/i, "")
     .trim()
     .toLowerCase();
 }
@@ -438,6 +450,7 @@ function comparePublicModels(a: ProviderModelConfig, b: ProviderModelConfig): nu
 function modelRank(id: string): [number, number] {
   const version = parseGeminiVersion(id);
   if (/^gemini-.*flash/i.test(id) && !/pro/i.test(id)) return [0, -version];
+  if (/^gemini-\d+-hydrogen(?!-sonar)/i.test(id)) return [0, -version];
   if (id.startsWith("claude-opus")) return [1, 0];
   if (id.startsWith("claude-sonnet")) return [2, 0];
   if (id.startsWith("claude-")) return [3, 0];
