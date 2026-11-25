@@ -38,22 +38,22 @@ export const ANTIGRAVITY_TOOLS: readonly AntigravityToolMeta[] = [
   {
     name: "web_search",
     label: "Web Search",
-    summary: "Google 联网搜索与实时信息检索",
+    summary: "Google web search and real-time information retrieval",
   },
   {
     name: "url_context",
     label: "URL Context",
-    summary: "网页、文档与 YouTube 视频内容解析",
+    summary: "Web page, document, and YouTube video content extraction",
   },
   {
     name: "generate_image",
     label: "Generate Image",
-    summary: "Gemini 图像生成（保存至 .pi/generated-images/）",
+    summary: "Gemini image generation (saves to .pi/generated-images/)",
   },
   {
     name: "analyze_file",
     label: "Analyze File",
-    summary: "本地 PDF、音频与视频多模态分析",
+    summary: "Local PDF, audio, and video multimodal analysis",
   },
 ];
 

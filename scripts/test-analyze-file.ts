@@ -171,9 +171,9 @@ try {
 		for (const [path, message] of cases) {
 			await expect(run({ path })).rejects.toThrow(message);
 		}
-		// The shared reader still provides /file's original localized diagnostics.
-		await expect(new AttachmentReader().load(join(dir, "invalid.pdf"))).rejects.toThrow("不能挂载");
-		await expect(new AttachmentReader().load(join(dir, "empty.pdf"))).rejects.toThrow("文件为空");
+		// The shared reader still provides /file's original diagnostics.
+		await expect(new AttachmentReader().load(join(dir, "invalid.pdf"))).rejects.toThrow("cannot mount");
+		await expect(new AttachmentReader().load(join(dir, "empty.pdf"))).rejects.toThrow("File is empty");
 		await expect(run({ instruction: " " })).rejects.toThrow(/required/);
 		await expect(run({ apiKey: "invalid" })).rejects.toThrow(/credentials/i);
 		expect(requests).toBe(0);
@@ -182,9 +182,9 @@ try {
 	await check("reader and filesystem errors are translated without leaking localized internals", async () => {
 		const originalLoad = AttachmentReader.prototype.load;
 		const failures: Array<[unknown, RegExp]> = [
-			[new FileValidationError("FILE_CHANGED", "文件正在变化，请稍后重试。"), /File analysis failed: The file changed while reading/],
-			[Object.assign(new Error("无法读取文件"), { code: "EACCES" }), /File analysis failed: Permission denied reading file/],
-			[new Error("内部读取错误，不能挂载。"), /File analysis failed: Unable to read or validate/],
+			[new FileValidationError("FILE_CHANGED", "File changed during read; please retry."), /File analysis failed: The file changed while reading/],
+			[Object.assign(new Error("cannot read file"), { code: "EACCES" }), /File analysis failed: Permission denied reading file/],
+			[new Error("internal read error, cannot mount."), /File analysis failed: Unable to read or validate/],
 		];
 		try {
 			for (const [error, message] of failures) {

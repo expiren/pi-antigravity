@@ -216,17 +216,17 @@ const component = new AntigravityDashboardComponent(
 // Default tab is accounts
 expect(component.getTab()).toBe("accounts");
 const accountsRender = component.render(100).join("\n");
-expect(accountsRender).toContain("[1 账号]");
-expect(accountsRender).toContain("2 模型");
-expect(accountsRender).toContain("3 工具");
-expect(accountsRender).toContain("4 诊断");
+expect(accountsRender).toContain("[1 Accounts]");
+expect(accountsRender).toContain("2 Models");
+expect(accountsRender).toContain("3 Tools");
+expect(accountsRender).toContain("4 Doctor");
 expect(accountsRender).toContain("look");
 
 // Press Tab -> switches to models tab
 component.handleInput("\t");
 expect(component.getTab()).toBe("models");
 const modelsRender = component.render(100).join("\n");
-expect(modelsRender).toContain("[2 模型]");
+expect(modelsRender).toContain("[2 Models]");
 expect(modelsRender).toContain("gemini-3.8-flash");
 expect(modelsRender).not.toContain("tab_internal_model");
 
@@ -242,7 +242,7 @@ expect(refreshModelsCalls).toBe(1);
 component.handleInput("3");
 expect(component.getTab()).toBe("tools");
 const toolsRender = component.render(100).join("\n");
-expect(toolsRender).toContain("[3 工具]");
+expect(toolsRender).toContain("[3 Tools]");
 expect(toolsRender).toContain("web_search");
 expect(toolsRender).toContain("analyze_file");
 
@@ -254,7 +254,7 @@ expect(toggledToolName).toBe("web_search");
 component.handleInput("4");
 expect(component.getTab()).toBe("doctor");
 const doctorRender = component.render(100).join("\n");
-expect(doctorRender).toContain("[4 诊断]");
+expect(doctorRender).toContain("[4 Doctor]");
 expect(doctorRender).toContain("Provider");
 expect(doctorRender).toContain("antigravity");
 

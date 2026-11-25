@@ -35,13 +35,13 @@ function parseArgs(args: string): { path: string; prompt: string } {
   if (text.startsWith('"') || text.startsWith("'")) {
     const end = text.indexOf(text[0], 1);
     if (end < 0 || (text[end + 1] && !/\s/.test(text[end + 1]))) {
-      throw new Error('路径引号不完整；用 /file "含空格的路径" [问题]。');
+      throw new Error('Incomplete path quotes; use /file "path with spaces" [prompt].');
     }
-    if (end === 1) throw new Error("请提供文件路径。");
+    if (end === 1) throw new Error("Please provide a file path.");
     return { path: text.slice(1, end), prompt: text.slice(end + 1).trim() };
   }
   const match = text.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-  if (!match) throw new Error("请提供文件路径。");
+  if (!match) throw new Error("Please provide a file path.");
   return { path: match[1], prompt: match[2] || "" };
 }
 
@@ -98,7 +98,10 @@ function completions(prefix: string, cwd: string): AutocompleteItem[] | null {
   if ((quote && path.includes(quote)) || (!quote && /\s/.test(path))) return null;
   const results: AutocompleteItem[] = ["clear", "status"]
     .filter((s) => s.startsWith(trimmed.toLowerCase()))
-    .map((s) => ({ value: s, label: `${s} - ${s === "clear" ? "卸载文件" : "查看挂载状态"}` }));
+    .map((s) => ({
+      value: s,
+      label: `${s} - ${s === "clear" ? "Unmount file" : "Show mount status"}`,
+    }));
   const slash = path.lastIndexOf("/");
   const directory = path.slice(0, slash + 1);
   const start = path.slice(slash + 1).toLowerCase();
@@ -158,7 +161,8 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("file", {
-    description: "挂载单个文件（PDF、图片、音视频、UTF-8 文本）；clear/status 管理附件",
+    description:
+      "Mount a single file (PDF, image, audio/video, UTF-8 text); clear/status to manage",
     getArgumentCompletions: (prefix) => completions(prefix, completionCwd),
     handler: async (args, ctx) => {
       completionCwd = ctx.cwd;
@@ -167,21 +171,24 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
       if (!text || text.toLowerCase() === "status") {
         ctx.ui.notify(
           attachment
-            ? `当前挂载: ${attachment.displayName}\n路径: ${attachment.absPath}\n类型: ${getFileFormat(attachment.absPath)?.mimeType}\n挂载时大小: ${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MiB\n状态: ${supportsFiles(ctx) ? "启用" : "暂停（仅 Antigravity Gemini）"}\n文件变化时重新读取；每次请求仍传输文件内容。`
-            : "当前没有挂载文件。使用 /file <路径> [问题]。",
+            ? `Mounted: ${attachment.displayName}\nPath: ${attachment.absPath}\nType: ${getFileFormat(attachment.absPath)?.mimeType}\nSize at mount: ${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MiB\nStatus: ${supportsFiles(ctx) ? "active" : "paused (Antigravity Gemini only)"}\nRe-read on change; file content sent with each request.`
+            : "No file mounted. Use /file <path> [prompt].",
           "info",
         );
         return;
       }
       // Neither mounting nor detaching may change an in-flight turn's context.
       if (!ctx.isIdle()) {
-        ctx.ui.notify("Agent 正在忙碌，请等待当前任务结束再挂载或卸载文件。", "warning");
+        ctx.ui.notify(
+          "Agent is busy; wait for the current task to finish before mounting or unmounting.",
+          "warning",
+        );
         return;
       }
       if (text.toLowerCase() === "clear") {
         pi.appendEntry<FileState>(STATE_TYPE, { version: 1, attachment: null });
         resetCache();
-        ctx.ui.notify("已卸载文件；后续请求不再还原附件。", "info");
+        ctx.ui.notify("File unmounted; subsequent requests will not include attachments.", "info");
         return;
       }
       try {
@@ -195,7 +202,7 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
           ctx.sessionManager.getSessionId() !== sessionId ||
           ctx.sessionManager.getLeafId() !== leafId
         ) {
-          throw new Error("会话或分支已变化，或 Agent 已开始运行；请重试。");
+          throw new Error("Session or branch changed, or the agent started running; please retry.");
         }
         const reference: FileReference = {
           id: randomUUID(),
@@ -209,12 +216,12 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
         cacheOwner = `${sessionId}:${reference.id}`;
         lastWarning = undefined;
         ctx.ui.notify(
-          `已挂载文件: ${reference.displayName} (${(reference.sizeBytes / 1024 / 1024).toFixed(2)} MiB)`,
+          `Mounted file: ${reference.displayName} (${(reference.sizeBytes / 1024 / 1024).toFixed(2)} MiB)`,
           "info",
         );
         if (!supportsFiles(ctx)) {
           ctx.ui.notify(
-            `附件已保存但暂停发送；请切换到 Antigravity Gemini 后再提问。${prompt ? "附带的问题未发送。" : ""}`,
+            `Attachment saved but paused; switch to Antigravity Gemini to send.${prompt ? " The attached prompt was not sent." : ""}`,
             "warning",
           );
         } else if (prompt) {
@@ -224,7 +231,7 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
         }
       } catch (error) {
         ctx.ui.notify(
-          `无法挂载文件: ${error instanceof Error ? error.message : String(error)}`,
+          `Unable to mount file: ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
       }
@@ -236,7 +243,10 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
     const { branch, mountIndex, attachment } = current(ctx);
     if (!attachment || !event.messages.length) return;
     if (!supportsFiles(ctx)) {
-      warn(ctx, "文件附件已暂停发送：仅支持 Antigravity Gemini；切回后自动恢复。");
+      warn(
+        ctx,
+        "File attachment paused: Antigravity Gemini only; will resume after switching back.",
+      );
       return;
     }
     const sourceIndex = branch.findIndex(
@@ -315,7 +325,7 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
       available = true;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      warn(ctx, `文件未发送: ${attachment.displayName} — ${reason}`);
+      warn(ctx, `File not sent: ${attachment.displayName} — ${reason}`);
       additions = [
         {
           type: "text",
@@ -334,7 +344,10 @@ export function registerFileAttachments(pi: ExtensionAPI): void {
     if (!missing.length) return;
     messages[target] = { ...message, content: [...content, ...missing] };
     if (Buffer.byteLength(JSON.stringify(messages)) > MAX_CONTEXT_BYTES) {
-      warn(ctx, "文件未发送：内联后的上下文超过本地 18 MiB 安全预算，请压缩对话或拆分文件。");
+      warn(
+        ctx,
+        "File not sent: inline context exceeds the local 18 MiB safety budget; shorten the conversation or split the file.",
+      );
       messages[target] = {
         ...message,
         content: [

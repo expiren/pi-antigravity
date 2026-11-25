@@ -289,12 +289,12 @@ try {
       await expect(reader.load(path)).rejects.toThrow();
     }
     await mkdir(join(dir, "folder.pdf"));
-    await expect(reader.load(join(dir, "folder.pdf"))).rejects.toThrow(/普通文件/);
+    await expect(reader.load(join(dir, "folder.pdf"))).rejects.toThrow(/regular file/);
     for (const [name, limit] of [["big.pdf", MAX_FILE_BYTES], ["big.txt", MAX_TEXT_BYTES]] as const) {
       const path = join(dir, name);
       await writeFile(path, "x");
       await truncate(path, limit + 1);
-      await expect(reader.load(path)).rejects.toThrow(/安全上限/);
+      await expect(reader.load(path)).rejects.toThrow(/safety limit/);
     }
   });
 
@@ -391,7 +391,7 @@ try {
     await h.mount("clear");
     expect(images(await h.hydrate(originalMessages))).toHaveLength(0);
     await h.mount("status");
-    expect(h.notices.at(-1)?.message).toContain("当前没有挂载文件");
+    expect(h.notices.at(-1)?.message).toContain("No file mounted");
   });
 
   await check("busy runs reject both mount and clear; async branch races are rejected", async () => {
@@ -409,7 +409,7 @@ try {
     const mount = h.mount("note.md");
     h.user("branch advanced while reading");
     await mount;
-    expect(h.notices.at(-1)?.message).toContain("会话或分支已变化");
+    expect(h.notices.at(-1)?.message).toContain("branch changed");
     expect(h.branch().filter((e) => e.type === "custom")).toHaveLength(1);
   });
 
@@ -424,7 +424,7 @@ try {
     h.ctx.model = undefined;
     await h.mount("note.md question");
     expect(h.sent).toHaveLength(0);
-    expect(h.notices.at(-1)?.message).toContain("问题未发送");
+    expect(h.notices.at(-1)?.message).toContain("not sent");
     h.ctx.model = model;
     await h.mount("report.PDF");
     const freshRaw = [h.user()];
@@ -460,7 +460,7 @@ try {
     const invalid = await h.hydrate(raw);
     expect(images(invalid)).toHaveLength(0);
     expect(attachmentGuidance(invalid)).toHaveLength(0);
-    expect(JSON.stringify(await h.hydrate(raw))).toContain("文件头");
+    expect(JSON.stringify(await h.hydrate(raw))).toContain("header");
   });
 
   await check("context byte budget removes only new attachment, not existing messages", async () => {

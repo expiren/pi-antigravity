@@ -119,5 +119,8 @@ export function validateInlineFile(bytes: Buffer, mimeType: string): void {
       break;
   }
   if (!valid)
-    throw new FileValidationError("INVALID_HEADER", `文件头与 ${mimeType} 不符，不能挂载。`);
+    throw new FileValidationError(
+      "INVALID_HEADER",
+      `File header does not match ${mimeType}; cannot mount.`,
+    );
 }
