@@ -224,7 +224,11 @@ export async function refreshModelCatalog(
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     if (typeof ctx.modelRegistry?.refresh === "function") {
-      const result = await ctx.modelRegistry.refresh({ force: true, providers: [PROVIDER_ID] });
+      const result = await ctx.modelRegistry.refresh({
+        force: true,
+        allowNetwork: true,
+        providers: [PROVIDER_ID],
+      });
       if (result?.errors?.has(PROVIDER_ID)) throw result.errors.get(PROVIDER_ID)!;
       return { ok: true };
     }

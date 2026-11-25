@@ -1,3 +1,5 @@
+import type { ModelsRefreshOptions } from "@earendil-works/pi-ai";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { antigravityHeaders, mergeAvailableModelsResults } from "../src/client/index.js";
 import {
   ANTIGRAVITY_MODELS,
@@ -23,6 +25,7 @@ import {
 } from "../src/models/index.js";
 import { ANTIGRAVITY_IMAGE_API, isAntigravityImageModelId } from "../src/models/image-catalog.js";
 import type { ModelInfoRaw } from "../src/types/types.js";
+import { refreshModelCatalog } from "../src/ui/dashboard.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`FAILED: ${message}`);
@@ -478,5 +481,40 @@ const h4Sonar = hydrogenCatalog.models.find((m) => m.id === "gemini-4-hydrogen-s
 assert(h4Sonar, "sonar is an independent selectable model");
 
 resetAntigravityCatalogForTests();
+
+// ── Host modelRegistry refresh explicitly opts into network discovery ──
+const refreshCalls: Array<ModelsRefreshOptions | undefined> = [];
+const refreshOk = await refreshModelCatalog(
+  {
+    modelRegistry: {
+      refresh: async (options?: ModelsRefreshOptions) => {
+        refreshCalls.push(options);
+        return { aborted: false, errors: new Map<string, Error>() };
+      },
+    },
+  } as unknown as ExtensionCommandContext,
+  JSON.stringify({ token: "fake", projectId: "fake" }),
+);
+assert(refreshOk.ok === true, "refreshModelCatalog succeeds when registry refresh has no errors");
+assert(refreshCalls.length === 1, "refreshModelCatalog calls modelRegistry.refresh once");
+assert(refreshCalls[0]?.force === true, "refreshModelCatalog passes force: true");
+assert(refreshCalls[0]?.allowNetwork === true, "refreshModelCatalog passes allowNetwork: true");
+assert(
+  Array.isArray(refreshCalls[0]?.providers) && refreshCalls[0].providers.includes("antigravity"),
+  "refreshModelCatalog scopes refresh to antigravity",
+);
+
+const refreshErr = await refreshModelCatalog(
+  {
+    modelRegistry: {
+      refresh: async () => ({
+        aborted: false,
+        errors: new Map([["antigravity", new Error("network failed")]]),
+      }),
+    },
+  } as unknown as ExtensionCommandContext,
+  JSON.stringify({ token: "fake", projectId: "fake" }),
+);
+assert(refreshErr.ok === false && refreshErr.error === "network failed", "refreshModelCatalog surfaces provider refresh errors");
 
 console.log("model discovery: persisted offline catalog, dynamic enums, and TTL passed");
